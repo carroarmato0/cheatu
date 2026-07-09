@@ -17,6 +17,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-informational">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange?logo=rust">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://ko-fi.com/carroarmato0"><img alt="Support me on Ko-fi" src="https://ko-fi.com/img/githubbutton_sm.svg" height="20"></a>
 </p>
 
 ---
