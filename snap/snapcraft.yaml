@@ -1,6 +1,6 @@
 name: cheatu
 base: core24
-version: '0.1.0'
+version: '1.0.1'
 summary: Memory scanner and cheat tool for Linux (CLI + GUI)
 description: |
   cheatu is a memory scanner for Linux inspired by Cheat Engine and scanmem.
@@ -21,11 +21,11 @@ confinement: classic
 
 apps:
   cheatu-gui:
-    command: bin/cheatu-gui
+    command: cheatu-gui
   cheatu:
-    command: bin/cheatu
+    command: cheatu
   cheatu-inject:
-    command: bin/cheatu-inject
+    command: cheatu-inject
 
 parts:
   cheatu:
