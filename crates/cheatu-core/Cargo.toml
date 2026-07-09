@@ -1,0 +1,9 @@
+[package]
+name = "cheatu-core"
+description = "Core memory scanning engine for cheatu (process listing, /proc/pid/maps parsing, memory read/write, scan engine, privilege helpers)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true

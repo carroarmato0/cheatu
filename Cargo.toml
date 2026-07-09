@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cheatu-core",
+    "crates/cheatu-cli",
+    "crates/cheatu-gui",
+    "crates/cheatu-inject",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/carroarmato0/cheatu"
+authors = ["Christophe Vanlancker"]
+
+[workspace.dependencies]
+cheatu-core = { path = "crates/cheatu-core" }
+libc = "0.2"
+
+# Optimize release builds: scanning is CPU-bound.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

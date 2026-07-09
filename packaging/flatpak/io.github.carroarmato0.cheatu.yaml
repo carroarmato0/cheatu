@@ -1,0 +1,61 @@
+# Flatpak manifest for cheatu.
+#
+#   flatpak-builder --user --install --force-clean build-dir \
+#       packaging/flatpak/io.github.carroarmato0.cheatu.yaml
+#
+# IMPORTANT — sandbox caveat:
+# cheatu's job is to inspect and edit *other* processes' memory. That is
+# fundamentally at odds with the Flatpak sandbox. This manifest opens it up as
+# far as is reasonable (--allow=devel for ptrace, --filesystem=host to reach
+# game folders), but pkexec-based privilege elevation does not cross the sandbox
+# cleanly, and some targets will still be unreachable. For unrestricted use,
+# prefer the native deb / rpm / AUR packages or the AppImage. The Flatpak is
+# offered mainly for the RPG Maker (JavaScript-injection) workflow, which only
+# needs the game's own files.
+app-id: io.github.carroarmato0.cheatu
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: cheatu-gui
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Relax seccomp so the scanner can ptrace / read other processes' memory.
+  - --allow=devel
+  # Reach game folders (Steam library, loose RPG Maker games) for injection.
+  - --filesystem=host
+  # Let it ask polkit for elevation (best-effort across the sandbox).
+  - --system-talk-name=org.freedesktop.PolicyKit1
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  # Simplest reproducible path: allow cargo network access at build time.
+  # For a Flathub submission this must be replaced by an offline
+  # `cargo-sources.json` (see `make flatpak-sources`) and this line removed.
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/cheatu/cargo
+
+modules:
+  - name: cheatu
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/cheatu -t /app/bin
+      - install -Dm755 target/release/cheatu-gui -t /app/bin
+      - install -Dm755 target/release/cheatu-inject -t /app/bin
+      - install -Dm644 packaging/assets/io.github.carroarmato0.cheatu.desktop
+          -t /app/share/applications
+      - install -Dm644 packaging/assets/io.github.carroarmato0.cheatu.metainfo.xml
+          -t /app/share/metainfo
+      - install -Dm644 packaging/assets/io.github.carroarmato0.cheatu.svg
+          /app/share/icons/hicolor/scalable/apps/io.github.carroarmato0.cheatu.svg
+    sources:
+      - type: dir
+        path: ../..

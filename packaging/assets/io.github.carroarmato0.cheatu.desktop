@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=cheatu
+GenericName=Memory Scanner
+Comment=Scan and edit process memory to enable cheats
+Exec=cheatu-gui
+Icon=io.github.carroarmato0.cheatu
+Terminal=false
+Categories=Utility;
+Keywords=cheat;memory;scanner;debug;game;trainer;
+StartupNotify=true
+StartupWMClass=cheatu-gui

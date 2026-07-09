@@ -1,0 +1,57 @@
+# Build environment for cheatu's native packages (deb, rpm, AppImage).
+#
+# One image, buildable with either engine:
+#   podman build -t cheatu-build -f packaging/Containerfile .
+#   docker build -t cheatu-build -f packaging/Containerfile .
+#
+# Debian is the base on purpose: cargo-deb's `$auto` dependency resolution
+# shells out to dpkg-shlibdeps, and building on an older glibc keeps the
+# resulting binaries widely runnable. Flatpak and Snap are NOT built here —
+# they have their own toolchains (flatpak-builder, snapcraft) and are
+# driven from CI or their manifests directly.
+#
+# (Flatpak and Snap use their own sandboxed toolchains — see packaging/flatpak
+# and snap/snapcraft.yaml.)
+FROM rust:1-bookworm
+
+# System packages:
+#  - dpkg-dev / lintian .... cargo-deb $auto shlib resolution
+#  - patchelf / file ....... required by linuxdeploy when bundling an AppImage
+#  - libfuse2 .............. lets the *tool* AppImages run (also EXTRACT_AND_RUN)
+#  - GUI dev/runtime libs .. so the eframe/glow build links and the AppImage
+#                            can bundle X11/Wayland/GL/xkbcommon
+#  - desktop-file-utils .... validates the .desktop file
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget file \
+        build-essential dpkg-dev lintian \
+        patchelf libfuse2 fuse \
+        desktop-file-utils \
+        libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
+        libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+        libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust packaging helpers (pinned major versions for reproducibility).
+RUN cargo install cargo-deb --version "^2" --locked \
+    && cargo install cargo-generate-rpm --version "^0.16" --locked
+
+# AppImage tooling: linuxdeploy assembles the AppDir and appimagetool seals it.
+# They are AppImages; fetch and extract them so they run without FUSE in CI.
+ARG TARGETARCH=amd64
+RUN set -eux; \
+    arch="x86_64"; \
+    cd /opt; \
+    wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${arch}.AppImage" -O linuxdeploy.AppImage; \
+    wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${arch}.AppImage" -O appimagetool.AppImage; \
+    chmod +x linuxdeploy.AppImage appimagetool.AppImage; \
+    ./linuxdeploy.AppImage --appimage-extract >/dev/null && mv squashfs-root /opt/linuxdeploy; \
+    ./appimagetool.AppImage --appimage-extract >/dev/null && mv squashfs-root /opt/appimagetool; \
+    ln -s /opt/linuxdeploy/AppRun /usr/local/bin/linuxdeploy; \
+    ln -s /opt/appimagetool/AppRun /usr/local/bin/appimagetool; \
+    rm -f linuxdeploy.AppImage appimagetool.AppImage
+
+# Running extracted appimagetool inside a container still wants this.
+ENV APPIMAGE_EXTRACT_AND_RUN=1
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]

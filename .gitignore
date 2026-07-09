@@ -1,0 +1,35 @@
+# Rust build artifacts
+/target/
+
+# Packaged output
+/dist/
+
+# Packaging build cruft
+/.flatpak-builder/
+packaging/aur/pkg/
+packaging/aur/src/
+packaging/aur/*.tar.gz
+packaging/aur/*.pkg.tar.*
+packaging/flatpak/.flatpak-builder/
+packaging/flatpak/cargo-sources.json
+
+# rustfmt backups
+**/*.rs.bk
+
+# Debug symbols
+*.pdb
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local tooling / assistant state (not part of the project)
+/.remember/
+/.claude/
+
+# Note: Cargo.lock is intentionally committed — this workspace ships
+# binaries (applications), so we pin exact dependency versions.

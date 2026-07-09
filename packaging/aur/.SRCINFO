@@ -1,0 +1,16 @@
+pkgbase = cheatu
+	pkgdesc = Memory scanner and cheat tool for Linux (CLI + GUI), inspired by Cheat Engine and scanmem
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/carroarmato0/cheatu
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	depends = gcc-libs
+	depends = polkit
+	depends = fontconfig
+	optdepends = noto-fonts-cjk: CJK text rendering in the GUI
+	source = cheatu-0.1.0.tar.gz::https://github.com/carroarmato0/cheatu/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = cheatu

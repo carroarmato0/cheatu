@@ -1,0 +1,15 @@
+[package]
+name = "cheatu-inject"
+description = "JavaScript-injection backend for NW.js games (RPG Maker MV/MZ) via the Chrome DevTools Protocol — a stable alternative to raw memory editing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cheatu-inject"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# Plain ws:// only (localhost DevTools) — no TLS features needed.
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

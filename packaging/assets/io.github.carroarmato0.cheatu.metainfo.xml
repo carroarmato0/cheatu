@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.carroarmato0.cheatu</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>cheatu</name>
+  <summary>Memory scanner and cheat tool for Linux</summary>
+  <developer id="io.github.carroarmato0">
+    <name>Christophe Vanlancker</name>
+  </developer>
+
+  <description>
+    <p>
+      cheatu is a memory scanner for Linux, inspired by Cheat Engine and scanmem.
+      Attach to a running process (games in particular), search for values, narrow
+      the results as those values change, and then edit or freeze them.
+    </p>
+    <p>It ships as one engine behind two front-ends:</p>
+    <ul>
+      <li>cheatu — a scanmem-style interactive command line.</li>
+      <li>cheatu-gui — a graphical UI (egui/eframe) that runs natively on both
+          Wayland and Xorg, and looks the same under KDE, GNOME, and standalone
+          window managers with no GTK or Qt dependency.</li>
+    </ul>
+    <p>
+      A dedicated RPG Maker MV/MZ (NW.js) mode uses JavaScript injection through
+      the engine's own data model, which is stable where raw memory freezing is not.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.carroarmato0.cheatu.desktop</launchable>
+
+  <provides>
+    <binary>cheatu</binary>
+    <binary>cheatu-gui</binary>
+    <binary>cheatu-inject</binary>
+  </provides>
+
+  <categories>
+    <category>Utility</category>
+    <category>Development</category>
+  </categories>
+
+  <url type="homepage">https://github.com/carroarmato0/cheatu</url>
+  <url type="bugtracker">https://github.com/carroarmato0/cheatu/issues</url>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-07-09">
+      <description>
+        <p>Initial release: multithreaded memory scanner (CLI + GUI) and the
+           RPG Maker MV/MZ JavaScript-injection backend.</p>
+      </description>
+    </release>
+  </releases>
+</component>

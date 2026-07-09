@@ -1,0 +1,73 @@
+[package]
+name = "cheatu-cli"
+description = "Command-line, scanmem-style interactive memory scanner for cheatu."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "cheatu"
+path = "src/main.rs"
+
+[dependencies]
+cheatu-core.workspace = true
+
+# ---------------------------------------------------------------------------
+# Native packaging.
+#
+# `cheatu-cli` is the anchor crate for the distro packages: one package named
+# `cheatu` that ships all three workspace binaries plus desktop integration.
+# The binaries and icon are referenced from `target/release`, so build the whole
+# workspace first (`cargo build --release`) and invoke these tools with
+# `--no-build` (the Makefile / packaging/build.sh do this).
+# ---------------------------------------------------------------------------
+
+# cargo-deb  (https://github.com/kornelski/cargo-deb)
+[package.metadata.deb]
+name = "cheatu"
+maintainer = "Christophe Vanlancker <carroarmato0@gmail.com>"
+copyright = "2026, Christophe Vanlancker"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+A memory scanner for Linux inspired by Cheat Engine and scanmem. Attach to a \
+running process, search for values, narrow the results as they change, then \
+edit or freeze them. Ships a scanmem-style CLI (cheatu), an egui GUI \
+(cheatu-gui) that runs on both Wayland and Xorg, and an RPG Maker MV/MZ \
+JavaScript-injection backend (cheatu-inject)."""
+section = "utils"
+priority = "optional"
+# `$auto` lets cargo-deb compute the shared-library dependencies from the
+# linked binaries; polkit provides pkexec for the elevation feature.
+depends = "$auto, polkit-1 | policykit-1"
+recommends = "fonts-noto-cjk"
+assets = [
+    ["../../target/release/cheatu", "usr/bin/", "755"],
+    ["../../target/release/cheatu-gui", "usr/bin/", "755"],
+    ["../../target/release/cheatu-inject", "usr/bin/", "755"],
+    ["../../packaging/assets/io.github.carroarmato0.cheatu.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/assets/io.github.carroarmato0.cheatu.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/assets/io.github.carroarmato0.cheatu.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../README.md", "usr/share/doc/cheatu/README.md", "644"],
+]
+
+# cargo-generate-rpm  (https://github.com/cat-in-136/cargo-generate-rpm)
+[package.metadata.generate-rpm]
+name = "cheatu"
+summary = "Memory scanner and cheat tool for Linux (CLI + GUI)"
+# Detect shared-library requires from the ELF binaries automatically.
+auto-req = "auto"
+assets = [
+    { source = "../../target/release/cheatu", dest = "/usr/bin/cheatu", mode = "755" },
+    { source = "../../target/release/cheatu-gui", dest = "/usr/bin/cheatu-gui", mode = "755" },
+    { source = "../../target/release/cheatu-inject", dest = "/usr/bin/cheatu-inject", mode = "755" },
+    { source = "../../packaging/assets/io.github.carroarmato0.cheatu.desktop", dest = "/usr/share/applications/io.github.carroarmato0.cheatu.desktop", mode = "644" },
+    { source = "../../packaging/assets/io.github.carroarmato0.cheatu.metainfo.xml", dest = "/usr/share/metainfo/io.github.carroarmato0.cheatu.metainfo.xml", mode = "644" },
+    { source = "../../packaging/assets/io.github.carroarmato0.cheatu.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.carroarmato0.cheatu.svg", mode = "644" },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/cheatu/LICENSE", mode = "644", doc = true },
+    { source = "../../README.md", dest = "/usr/share/doc/cheatu/README.md", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+polkit = "*"

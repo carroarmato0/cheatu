@@ -1,0 +1,49 @@
+name: cheatu
+base: core24
+version: '0.1.0'
+summary: Memory scanner and cheat tool for Linux (CLI + GUI)
+description: |
+  cheatu is a memory scanner for Linux inspired by Cheat Engine and scanmem.
+  Attach to a running process, search for values, narrow the results as they
+  change, then edit or freeze them.
+
+  It ships a scanmem-style CLI (cheatu), an egui GUI (cheatu-gui) that runs on
+  both Wayland and Xorg, and an RPG Maker MV/MZ JavaScript-injection backend
+  (cheatu-inject).
+
+  NOTE: cheatu inspects and edits *other* processes' memory, which requires
+  broad system access. This snap therefore uses classic confinement — it runs
+  with the same privileges as a natively installed package. Classic snaps are
+  reviewed manually by the Snap Store before they can be published.
+license: MIT
+grade: stable
+confinement: classic
+
+apps:
+  cheatu-gui:
+    command: bin/cheatu-gui
+  cheatu:
+    command: bin/cheatu
+  cheatu-inject:
+    command: bin/cheatu-inject
+
+parts:
+  cheatu:
+    plugin: rust
+    source: .
+    rust-channel: stable
+    build-packages:
+      - libxkbcommon-dev
+      - libwayland-dev
+      - libx11-dev
+      - libxcursor-dev
+      - libxrandr-dev
+      - libxi-dev
+      - libgl1-mesa-dev
+      - pkg-config
+    stage-packages:
+      - libxkbcommon0
+      - libwayland-client0
+      - libx11-6
+      - libgl1
+      - fontconfig

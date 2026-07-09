@@ -1,0 +1,107 @@
+name: Release
+
+# Publishing a tag like v0.1.0 builds every package format and attaches the
+# artifacts to the GitHub Release for that tag.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---- deb / rpm / AppImage, built in the packaging container ------------
+  linux-packages:
+    name: deb · rpm · AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build packaging image
+        run: docker build -t cheatu-build -f packaging/Containerfile .
+
+      - name: Build packages
+        run: |
+          docker run --rm \
+            -e VERSION="${GITHUB_REF_NAME#v}" \
+            -v "$PWD":/work -w /work \
+            cheatu-build packaging/build.sh all
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.AppImage
+
+  # ---- Flatpak ----------------------------------------------------------
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: cheatu.flatpak
+          manifest-path: packaging/flatpak/io.github.carroarmato0.cheatu.yaml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cheatu.flatpak
+
+  # ---- Snap -------------------------------------------------------------
+  snap:
+    name: Snap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build snap
+        id: build
+        uses: snapcore/action-build@v1
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build.outputs.snap }}
+
+  # ---- AUR (optional) ---------------------------------------------------
+  # Publishes packaging/aur/PKGBUILD to the AUR. Requires an SSH key stored in
+  # the AUR_SSH_PRIVATE_KEY secret and an existing `cheatu` AUR package. Runs
+  # only on the canonical repo; never blocks the release if it fails.
+  aur:
+    name: AUR
+    runs-on: ubuntu-latest
+    if: github.repository == 'carroarmato0/cheatu'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set pkgver from tag
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${GITHUB_REF_NAME#v}/" packaging/aur/PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v2.7.2
+        with:
+          pkgname: cheatu
+          pkgbuild: packaging/aur/PKGBUILD
+          commit_username: ${{ github.actor }}
+          commit_email: ${{ github.actor }}@users.noreply.github.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ github.ref_name }}"

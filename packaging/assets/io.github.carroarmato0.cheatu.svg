@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2f45"/>
+      <stop offset="1" stop-color="#171a29"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded background -->
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)"/>
+
+  <!-- memory grid: a stylised block of scanned bytes -->
+  <g fill="#3b4166">
+    <rect x="24" y="26" width="12" height="12" rx="2"/>
+    <rect x="40" y="26" width="12" height="12" rx="2"/>
+    <rect x="56" y="26" width="12" height="12" rx="2"/>
+    <rect x="24" y="42" width="12" height="12" rx="2"/>
+    <rect x="40" y="42" width="12" height="12" rx="2" fill="#5eead4"/>
+    <rect x="56" y="42" width="12" height="12" rx="2"/>
+    <rect x="24" y="58" width="12" height="12" rx="2"/>
+    <rect x="40" y="58" width="12" height="12" rx="2"/>
+    <rect x="56" y="58" width="12" height="12" rx="2"/>
+  </g>
+
+  <!-- magnifying glass -->
+  <circle cx="76" cy="72" r="26" fill="none" stroke="url(#glass)" stroke-width="9"/>
+  <line x1="94" y1="90" x2="112" y2="108" stroke="url(#glass)" stroke-width="12" stroke-linecap="round"/>
+  <!-- crosshair inside the lens -->
+  <g stroke="#e2f7ff" stroke-width="3" stroke-linecap="round" opacity="0.9">
+    <line x1="76" y1="60" x2="76" y2="84"/>
+    <line x1="64" y1="72" x2="88" y2="72"/>
+  </g>
+</svg>

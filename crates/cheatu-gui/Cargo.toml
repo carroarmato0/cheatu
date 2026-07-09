@@ -1,0 +1,17 @@
+[package]
+name = "cheatu-gui"
+description = "Cross-platform (Wayland + X11) GUI for cheatu, built on egui/eframe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cheatu-gui"
+path = "src/main.rs"
+
+[dependencies]
+cheatu-core.workspace = true
+cheatu-inject = { path = "../cheatu-inject" }
+eframe = "0.29"
+egui_extras = "0.29"
+serde_json = "1"

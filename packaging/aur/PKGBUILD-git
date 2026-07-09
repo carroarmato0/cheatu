@@ -1,0 +1,56 @@
+# Maintainer: Christophe Vanlancker <carroarmato0@gmail.com>
+# AUR "-git" variant: builds from the latest main branch.
+# Rename to PKGBUILD when publishing the `cheatu-git` AUR package.
+pkgname=cheatu-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Memory scanner and cheat tool for Linux (CLI + GUI) — git version"
+arch=('x86_64')
+url="https://github.com/carroarmato0/cheatu"
+license=('MIT')
+depends=('gcc-libs' 'polkit' 'fontconfig')
+optdepends=('noto-fonts-cjk: CJK text rendering in the GUI')
+makedepends=('cargo' 'git')
+provides=('cheatu')
+conflicts=('cheatu')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    # e.g. 0.1.0.r42.gabc1234
+    printf "%s.r%s.g%s" \
+        "$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')" \
+        "$(git rev-list --count HEAD)" \
+        "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --workspace
+}
+
+package() {
+    cd "$pkgname"
+    install -Dm755 target/release/cheatu "$pkgdir/usr/bin/cheatu"
+    install -Dm755 target/release/cheatu-gui "$pkgdir/usr/bin/cheatu-gui"
+    install -Dm755 target/release/cheatu-inject "$pkgdir/usr/bin/cheatu-inject"
+
+    install -Dm644 packaging/assets/io.github.carroarmato0.cheatu.desktop \
+        "$pkgdir/usr/share/applications/io.github.carroarmato0.cheatu.desktop"
+    install -Dm644 packaging/assets/io.github.carroarmato0.cheatu.metainfo.xml \
+        "$pkgdir/usr/share/metainfo/io.github.carroarmato0.cheatu.metainfo.xml"
+    install -Dm644 packaging/assets/io.github.carroarmato0.cheatu.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.carroarmato0.cheatu.svg"
+
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/cheatu/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/cheatu/README.md"
+}

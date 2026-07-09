@@ -1,0 +1,25 @@
+#!/bin/sh
+# cheatu AppImage entry point.
+#
+# The AppImage bundles all three binaries. Which one runs is chosen by:
+#   1. the name the AppImage was launched as (rename/symlink it to `cheatu`
+#      or `cheatu-inject` to get the CLI tools), then
+#   2. an explicit first argument (`gui`, `cli`, `inject`), else
+#   3. the GUI by default.
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="$HERE/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH}"
+
+base="$(basename "${ARGV0:-$0}")"
+case "$base" in
+    cheatu|cheatu-cli)  exec "$HERE/usr/bin/cheatu" "$@" ;;
+    cheatu-inject)      exec "$HERE/usr/bin/cheatu-inject" "$@" ;;
+esac
+
+case "$1" in
+    cli|cheatu)     shift; exec "$HERE/usr/bin/cheatu" "$@" ;;
+    inject)         shift; exec "$HERE/usr/bin/cheatu-inject" "$@" ;;
+    gui|cheatu-gui) shift; exec "$HERE/usr/bin/cheatu-gui" "$@" ;;
+esac
+
+exec "$HERE/usr/bin/cheatu-gui" "$@"
