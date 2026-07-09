@@ -1,6 +1,11 @@
 name: cheatu
+title: Cheatu
 base: core24
 version: '1.0.1'
+website: https://github.com/carroarmato0/cheatu
+source-code: https://github.com/carroarmato0/cheatu
+issues: https://github.com/carroarmato0/cheatu/issues
+contact: https://github.com/carroarmato0/cheatu/issues
 summary: Memory scanner and cheat tool for Linux (CLI + GUI)
 description: |
   cheatu is a memory scanner for Linux inspired by Cheat Engine and scanmem.

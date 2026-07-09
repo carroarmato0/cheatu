@@ -12,6 +12,7 @@ version = "1.0.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/carroarmato0/cheatu"
+homepage = "https://github.com/carroarmato0/cheatu"
 authors = ["Christophe Vanlancker"]
 
 [workspace.dependencies]
