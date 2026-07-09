@@ -43,9 +43,13 @@ pub fn relaunch_elevated() -> io::Error {
 
     let mut cmd = Command::new("pkexec");
     // `pkexec` scrubs the environment, so re-inject the vars a GUI needs to
-    // connect to the running Wayland/X11 session via `env`.
+    // connect to the running Wayland/X11 session via `env`. HOME and
+    // XDG_CONFIG_HOME keep config lookups (e.g. the saved theme) pointing at
+    // the invoking user's files instead of /root's.
     cmd.arg("env");
     for key in [
+        "HOME",
+        "XDG_CONFIG_HOME",
         "DISPLAY",
         "WAYLAND_DISPLAY",
         "XDG_RUNTIME_DIR",
