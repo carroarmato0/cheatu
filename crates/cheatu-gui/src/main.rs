@@ -35,11 +35,17 @@ struct FreezeShared {
 /// but building the snapshot for millions of hits would still be wasteful).
 const MAX_DISPLAY: usize = 2000;
 
+/// Set by build.rs: the git tag when built exactly on one, else the short
+/// commit hash, else the crate version (tarball builds without .git).
+const VERSION: &str = env!("CHEATU_VERSION");
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 660.0])
-            .with_min_inner_size([720.0, 460.0])
+            .with_inner_size([1100.0, 700.0])
+            // Wide enough for the full header row (tabs, attach status,
+            // settings/about buttons) without squishing.
+            .with_min_inner_size([960.0, 540.0])
             .with_title("cheatu"),
         ..Default::default()
     };
@@ -47,10 +53,15 @@ fn main() -> eframe::Result<()> {
         "cheatu",
         options,
         Box::new(|cc| {
+            // Needed to render the SVG logo in the About window.
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             install_cjk_font(&cc.egui_ctx);
             configure_style(&cc.egui_ctx);
+            let theme = load_theme();
+            apply_theme(&cc.egui_ctx, theme);
             Ok(Box::new(CheatuApp {
                 pause_while_scanning: true,
+                theme,
                 ..Default::default()
             }))
         }),
@@ -114,7 +125,104 @@ fn configure_style(ctx: &eframe::egui::Context) {
     .into();
     style.spacing.item_spacing = eframe::egui::vec2(8.0, 6.0);
     style.spacing.button_padding = eframe::egui::vec2(7.0, 3.0);
+    // Match row pre-sizing to our padded button height (15pt text + 2×3pt
+    // padding), so labels next to buttons center on the same line.
+    style.spacing.interact_size.y = 22.0;
+    // Labels must not grab clicks/hover for text selection, or clicking table
+    // rows only works in the gaps between texts and hover highlights flicker.
+    style.interaction.selectable_labels = false;
     ctx.set_style(style);
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
+enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+fn apply_theme(ctx: &eframe::egui::Context, theme: Theme) {
+    use eframe::egui::{Color32, Visuals};
+    let mut v = match theme {
+        Theme::Dark => Visuals::dark(),
+        Theme::Light => Visuals::light(),
+    };
+    // egui's default grey text is low-contrast; brighten plain labels and
+    // resting-widget text while keeping hover/active/disabled semantics.
+    let text = match theme {
+        Theme::Dark => Color32::from_gray(220),
+        Theme::Light => Color32::from_gray(10),
+    };
+    v.widgets.noninteractive.fg_stroke.color = text;
+    v.widgets.inactive.fg_stroke.color = text;
+    // `.weak()` text is a 50% blend of the text color toward this fill; the
+    // default (≈window bg) lands unreadably dim, so blend toward a mid grey
+    // instead: weak text ends up ~gray(170) on dark, ~gray(75) on light.
+    v.widgets.noninteractive.weak_bg_fill = match theme {
+        Theme::Dark => Color32::from_gray(120),
+        Theme::Light => Color32::from_gray(140),
+    };
+    ctx.set_visuals(v);
+}
+
+/// Accent colors: the bright shades tuned for the dark theme wash out on a
+/// light background, so pick darker equivalents there.
+fn accent(ui: &eframe::egui::Ui, dark: [u8; 3], light: [u8; 3]) -> eframe::egui::Color32 {
+    let [r, g, b] = if ui.visuals().dark_mode { dark } else { light };
+    eframe::egui::Color32::from_rgb(r, g, b)
+}
+
+fn ok_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
+    accent(ui, [120, 230, 140], [0, 128, 55])
+}
+
+fn warn_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
+    accent(ui, [240, 220, 120], [154, 108, 0])
+}
+
+fn err_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
+    accent(ui, [255, 96, 96], [185, 28, 28])
+}
+
+fn wine_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
+    accent(ui, [120, 170, 255], [29, 78, 216])
+}
+
+/// XDG base-dir spec: $XDG_CONFIG_HOME/cheatu/config.json, falling back to
+/// ~/.config/cheatu/config.json (relative XDG_CONFIG_HOME must be ignored).
+fn config_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home_dir().join(".config"))
+        .join("cheatu")
+        .join("config.json")
+}
+
+fn load_theme() -> Theme {
+    let Ok(text) = std::fs::read_to_string(config_path()) else {
+        return Theme::default();
+    };
+    let theme = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("theme")?.as_str().map(str::to_owned));
+    match theme.as_deref() {
+        Some("light") => Theme::Light,
+        _ => Theme::Dark,
+    }
+}
+
+/// Best-effort: a lost theme preference is not worth an error dialog.
+fn save_theme(theme: Theme) {
+    let path = config_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let name = match theme {
+        Theme::Dark => "dark",
+        Theme::Light => "light",
+    };
+    let _ = std::fs::write(path, serde_json::json!({ "theme": name }).to_string());
 }
 
 /// Find a CJK font: an explicit override, then fontconfig, then known paths.
@@ -347,8 +455,6 @@ fn home_dir() -> PathBuf {
 impl RpgState {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) {
         use eframe::egui;
-        const GREEN: egui::Color32 = egui::Color32::from_rgb(120, 230, 140);
-        const YELLOW: egui::Color32 = egui::Color32::from_rgb(240, 220, 120);
 
         ui.heading("RPG Maker mode — JavaScript injection");
         ui.label(
@@ -437,7 +543,7 @@ impl RpgState {
                 }
             } else {
                 if outdated {
-                    ui.colored_label(YELLOW, "agent outdated — update available");
+                    ui.colored_label(warn_color(ui), "agent outdated — update available");
                     if ui.button("Update agent").clicked() {
                         self.status = match agent::install(&dir) {
                             Ok(()) => {
@@ -449,7 +555,7 @@ impl RpgState {
                 } else {
                     let short = agent::installed_hash(&dir).unwrap_or_default();
                     let short = &short[..8.min(short.len())];
-                    ui.colored_label(GREEN, format!("agent installed ({short})"));
+                    ui.colored_label(ok_color(ui), format!("agent installed ({short})"));
                 }
                 if ui.button("Uninstall").clicked() {
                     self.status = match agent::uninstall(&dir) {
@@ -460,7 +566,10 @@ impl RpgState {
             }
         });
         if !engine.is_nwjs() {
-            ui.colored_label(YELLOW, "This folder doesn't look like an NW.js game.");
+            ui.colored_label(
+                warn_color(ui),
+                "This folder doesn't look like an NW.js game.",
+            );
         }
         if !self.status.is_empty() {
             ui.label(egui::RichText::new(&self.status).italics());
@@ -493,7 +602,7 @@ impl RpgState {
             Some(snap) if !snap.rpgmaker => {
                 if snap.stopped || snap.error.is_some() {
                     let msg = snap.error.as_deref().unwrap_or("exception");
-                    ui.colored_label(egui::Color32::from_rgb(255, 96, 96), format!("⚠ {msg}"));
+                    ui.colored_label(err_color(ui), format!("⚠ {msg}"));
                     if ui
                         .button("Try recover")
                         .on_hover_text("Resume the game loop after a crash, avoiding a relaunch")
@@ -614,7 +723,7 @@ impl RpgState {
                                         egui::RichText::new(engine.label())
                                             .weak()
                                             .small()
-                                            .color(egui::Color32::from_rgb(120, 230, 140)),
+                                            .color(ok_color(ui)),
                                     );
                                 });
                             } else if ui.button(format!("📁 {name}")).clicked() {
@@ -663,7 +772,7 @@ impl RpgState {
         // is restarted; some features won't work until it reloads.
         if snap.agent_hash.as_deref() != Some(agent::agent_hash().as_str()) {
             ui.colored_label(
-                egui::Color32::from_rgb(240, 220, 120),
+                warn_color(ui),
                 "Running agent differs from the installed one — restart the game to load it.",
             );
         }
@@ -757,7 +866,7 @@ impl RpgState {
             }
             if snap.stopped || snap.error.is_some() {
                 let msg = snap.error.as_deref().unwrap_or("game appears frozen");
-                ui.colored_label(egui::Color32::from_rgb(255, 96, 96), format!("⚠ {msg}"));
+                ui.colored_label(err_color(ui), format!("⚠ {msg}"));
             } else {
                 ui.label(
                     egui::RichText::new("(use if the game freezes or throws an error)")
@@ -1101,6 +1210,11 @@ struct CheatuApp {
     // Background freeze.
     freeze_state: Arc<Mutex<FreezeShared>>,
     freeze_started: bool,
+
+    // Preferences & modals.
+    theme: Theme,
+    show_about: bool,
+    show_settings: bool,
 }
 
 impl CheatuApp {
@@ -1352,15 +1466,20 @@ impl eframe::App for CheatuApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("ℹ").on_hover_text("About cheatu").clicked() {
+                        self.show_about = true;
+                    }
+                    if ui.button("⚙").on_hover_text("Settings").clicked() {
+                        self.show_settings = true;
+                    }
+                    ui.separator();
                     if privilege::is_root() {
-                        ui.label(egui::RichText::new("root ✓").color(egui::Color32::GREEN));
+                        ui.label(egui::RichText::new("root ✓").color(ok_color(ui)));
                     } else {
                         if ui.button("Request root access").clicked() {
                             do_elevate = true;
                         }
-                        ui.label(
-                            egui::RichText::new("limited privileges").color(egui::Color32::YELLOW),
-                        );
+                        ui.label(egui::RichText::new("limited privileges").color(warn_color(ui)));
                     }
                 });
             });
@@ -1609,7 +1728,7 @@ impl eframe::App for CheatuApp {
                                     // you just changed jump out.
                                     let mut text = egui::RichText::new(cur.to_string()).monospace();
                                     if !cur.approx_eq(&d.prev) {
-                                        text = text.color(egui::Color32::from_rgb(255, 96, 96));
+                                        text = text.color(err_color(ui));
                                     }
                                     ui.label(text);
                                 }
@@ -1756,14 +1875,14 @@ impl eframe::App for CheatuApp {
                                 row.col(|ui| {
                                     let mut text = egui::RichText::new(&p.name).strong();
                                     if p.is_wine {
-                                        text = text.color(egui::Color32::from_rgb(120, 170, 255));
+                                        text = text.color(wine_color(ui));
                                     }
                                     ui.add(egui::Label::new(text).truncate());
                                     if p.is_wine {
                                         ui.label(
                                             egui::RichText::new("proton")
                                                 .small()
-                                                .color(egui::Color32::from_rgb(120, 170, 255)),
+                                                .color(wine_color(ui)),
                                         );
                                     }
                                 });
@@ -1772,9 +1891,9 @@ impl eframe::App for CheatuApp {
                                         // Highlight "renderer" — the game process
                                         // for Chromium/NW.js titles.
                                         let color = if role == "renderer" {
-                                            egui::Color32::from_rgb(120, 230, 140)
+                                            ok_color(ui)
                                         } else {
-                                            egui::Color32::GRAY
+                                            ui.visuals().weak_text_color()
                                         };
                                         ui.label(egui::RichText::new(role).small().color(color));
                                     }
@@ -1822,6 +1941,51 @@ impl eframe::App for CheatuApp {
             if !open || close {
                 self.show_picker = false;
             }
+        }
+
+        // ---- About ------------------------------------------------------
+        egui::Window::new("About cheatu")
+            .open(&mut self.show_about)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add(
+                        egui::Image::new(egui::include_image!(
+                            "../../../packaging/assets/io.github.carroarmato0.cheatu.svg"
+                        ))
+                        .fit_to_exact_size(egui::vec2(96.0, 96.0)),
+                    );
+                    ui.add_space(4.0);
+                    ui.heading("cheatu");
+                    ui.label(egui::RichText::new(VERSION).weak());
+                    ui.add_space(4.0);
+                    ui.label("A memory scanner and cheat tool for games on Linux,\nincluding Wine/Proton and RPG Maker titles.");
+                    ui.add_space(4.0);
+                    ui.hyperlink("https://github.com/carroarmato0/cheatu");
+                    ui.add_space(4.0);
+                });
+            });
+
+        // ---- Settings ---------------------------------------------------
+        let mut theme = self.theme;
+        egui::Window::new("Settings")
+            .open(&mut self.show_settings)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Theme:");
+                    ui.selectable_value(&mut theme, Theme::Dark, "Dark");
+                    ui.selectable_value(&mut theme, Theme::Light, "Light");
+                });
+            });
+        if theme != self.theme {
+            self.theme = theme;
+            apply_theme(ctx, theme);
+            save_theme(theme);
         }
 
         // ---- Apply deferred actions ------------------------------------
