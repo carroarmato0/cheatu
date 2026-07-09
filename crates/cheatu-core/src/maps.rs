@@ -55,10 +55,8 @@ pub fn read_maps(pid: i32) -> io::Result<Vec<MemoryRegion>> {
         let Some((start, end)) = range.split_once('-') else {
             continue;
         };
-        let (Ok(start), Ok(end)) = (
-            u64::from_str_radix(start, 16),
-            u64::from_str_radix(end, 16),
-        ) else {
+        let (Ok(start), Ok(end)) = (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16))
+        else {
             continue;
         };
 

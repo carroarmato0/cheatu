@@ -388,7 +388,11 @@ pub fn snapshot(game_dir: &Path) -> Result<Snapshot, String> {
                     let n = |k: &str| m.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
                     Member {
                         id: n("id"),
-                        name: m.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+                        name: m
+                            .get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
                         level: n("level"),
                         hp: n("hp"),
                         mhp: n("mhp"),
@@ -410,12 +414,19 @@ pub fn snapshot(game_dir: &Path) -> Result<Snapshot, String> {
         freezes: v
             .get("freezes")
             .and_then(|f| f.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
         in_battle: v.get("inBattle").and_then(|x| x.as_bool()).unwrap_or(false),
         stopped: v.get("stopped").and_then(|x| x.as_bool()).unwrap_or(false),
         error: v.get("error").and_then(|x| x.as_str()).map(String::from),
-        agent_hash: v.get("agentHash").and_then(|x| x.as_str()).map(String::from),
+        agent_hash: v
+            .get("agentHash")
+            .and_then(|x| x.as_str())
+            .map(String::from),
     })
 }
 
@@ -494,7 +505,11 @@ pub fn read_catalog(game_dir: &Path) -> Option<Catalog> {
                 arr.iter()
                     .map(|e| DbEntry {
                         id: e.get("id").and_then(|x| x.as_i64()).unwrap_or(0),
-                        name: e.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        name: e
+                            .get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         count: e.get("count").and_then(|x| x.as_i64()).unwrap_or(0),
                     })
                     .collect()
@@ -508,7 +523,11 @@ pub fn read_catalog(game_dir: &Path) -> Option<Catalog> {
                 arr.iter()
                     .map(|e| NamedEntry {
                         id: e.get("id").and_then(|x| x.as_i64()).unwrap_or(0),
-                        name: e.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        name: e
+                            .get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         value: e.get("value").cloned().unwrap_or(Value::Null),
                     })
                     .collect()
@@ -561,7 +580,10 @@ pub fn recover(game_dir: &Path) -> Result<(), String> {
 
 /// Set a JS lvalue to a JSON value once.
 pub fn set_expr(game_dir: &Path, expr: &str, value: Value) -> Result<(), String> {
-    send(game_dir, json!([{ "type": "set", "expr": expr, "value": value }]))
+    send(
+        game_dir,
+        json!([{ "type": "set", "expr": expr, "value": value }]),
+    )
 }
 
 /// Run arbitrary JavaScript once.
@@ -579,7 +601,10 @@ pub fn freeze_value(game_dir: &Path, key: &str, expr: &str, value: Value) -> Res
 
 /// Freeze by running a JS statement every tick (e.g. keep a stat at its max).
 pub fn freeze_run(game_dir: &Path, key: &str, run: &str) -> Result<(), String> {
-    send(game_dir, json!([{ "type": "freeze", "key": key, "run": run }]))
+    send(
+        game_dir,
+        json!([{ "type": "freeze", "key": key, "run": run }]),
+    )
 }
 
 pub fn unfreeze(game_dir: &Path, key: &str) -> Result<(), String> {

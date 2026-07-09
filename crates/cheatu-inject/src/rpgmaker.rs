@@ -32,7 +32,9 @@ impl<'a> RpgMaker<'a> {
     /// The game's title from its system data.
     pub fn game_title(&mut self) -> String {
         self.cdp
-            .eval_string("(typeof $dataSystem!=='undefined' && $dataSystem && $dataSystem.gameTitle) || ''")
+            .eval_string(
+                "(typeof $dataSystem!=='undefined' && $dataSystem && $dataSystem.gameTitle) || ''",
+            )
             .unwrap_or_default()
     }
 
@@ -43,7 +45,9 @@ impl<'a> RpgMaker<'a> {
     /// Set party gold (clamped to the engine's max, like the game would).
     pub fn set_gold(&mut self, amount: i64) -> Result<(), String> {
         self.cdp
-            .eval(&format!("$gameParty._gold = Math.min({amount}, $gameParty.maxGold())"))
+            .eval(&format!(
+                "$gameParty._gold = Math.min({amount}, $gameParty.maxGold())"
+            ))
             .map(|_| ())
     }
 

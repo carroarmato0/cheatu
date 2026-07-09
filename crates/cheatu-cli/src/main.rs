@@ -23,7 +23,10 @@ fn main() {
         }
     }
 
-    println!("cheatu {} — Linux memory scanner", env!("CARGO_PKG_VERSION"));
+    println!(
+        "cheatu {} — Linux memory scanner",
+        env!("CARGO_PKG_VERSION")
+    );
     if privilege::is_root() {
         println!("running with root privileges.");
     } else {
@@ -152,7 +155,10 @@ impl Repl {
                     .find(|p| p.pid == pid)
                     .map(|p| p.name)
                     .unwrap_or_else(|| "?".into());
-                println!("attached to pid {pid} ({name}); scan type = {}", self.type_label());
+                println!(
+                    "attached to pid {pid} ({name}); scan type = {}",
+                    self.type_label()
+                );
                 self.scanner = Some(s);
             }
             Err(e) => {
@@ -277,11 +283,7 @@ impl Repl {
             },
             // Bare value: `next 120`.
             other if !other.is_empty() => (NextScan::Eq, Some(other)),
-            _ => {
-                return println!(
-                    "usage: next <inc|dec|changed|unchanged|> N|< N|= N|!= N|VALUE>"
-                )
-            }
+            _ => return println!("usage: next <inc|dec|changed|unchanged|> N|< N|= N|!= N|VALUE>"),
         };
 
         match scanner.next_scan(cmp, arg) {

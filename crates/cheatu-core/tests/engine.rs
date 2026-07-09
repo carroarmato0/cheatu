@@ -24,7 +24,8 @@ fn first_scan_finds_a_known_value() {
     let addr = &*boxed as *const u64 as u64;
 
     let mut sc = Scanner::new(own_pid()).unwrap();
-    sc.first_scan(exact("81985529216486895", ScanType::U64)).unwrap();
+    sc.first_scan(exact("81985529216486895", ScanType::U64))
+        .unwrap();
 
     assert!(
         sc.results().iter().any(|c| c.addr == addr),

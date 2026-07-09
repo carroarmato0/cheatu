@@ -113,7 +113,10 @@ fn cmd_agent_freeze_max(args: &[String]) -> Result<(), String> {
     };
     let key = format!("max_{stat}{}", if all { "_all" } else { "" });
     agent::send(dir, json!([{ "type": "freeze", "key": key, "run": run }]))?;
-    println!("freezing {stat} at max ({})", if all { "whole party" } else { "leader" });
+    println!(
+        "freezing {stat} at max ({})",
+        if all { "whole party" } else { "leader" }
+    );
     Ok(())
 }
 
@@ -122,7 +125,10 @@ fn cmd_agent_party(args: &[String]) -> Result<(), String> {
     let s = agent::state(dir)?;
     match s.get("party").and_then(|p| p.as_array()) {
         Some(members) if !members.is_empty() => {
-            println!("gold: {}", s.get("gold").unwrap_or(&serde_json::Value::Null));
+            println!(
+                "gold: {}",
+                s.get("gold").unwrap_or(&serde_json::Value::Null)
+            );
             for m in members {
                 println!(
                     "  [{}] {}  Lv{}  HP {}/{}  MP {}/{}  TP {}",
@@ -137,7 +143,9 @@ fn cmd_agent_party(args: &[String]) -> Result<(), String> {
                 );
             }
         }
-        _ => println!("no party data (not an RPG Maker game, or agent not updated — restart the game)"),
+        _ => println!(
+            "no party data (not an RPG Maker game, or agent not updated — restart the game)"
+        ),
     }
     Ok(())
 }
@@ -186,7 +194,10 @@ fn cmd_agent_give(args: &[String]) -> Result<(), String> {
         Some("armor") => agent::ItemKind::Armor,
         _ => return Err("usage: agent-give <dir> <item|weapon|armor> <id> <count>".into()),
     };
-    let id: i64 = args.get(2).and_then(|s| s.parse().ok()).ok_or("need <id>")?;
+    let id: i64 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <id>")?;
     let count: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
     agent::gain_item(dir, kind, id, count)?;
     println!("gave {kind:?} {id} x{count}");
@@ -197,16 +208,25 @@ fn cmd_agent_var(args: &[String]) -> Result<(), String> {
     let dir = game_dir(args)?;
     match args.get(1).map(String::as_str) {
         Some("get") => {
-            let id: u32 = args.get(2).and_then(|s| s.parse().ok()).ok_or("need <id>")?;
+            let id: u32 = args
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .ok_or("need <id>")?;
             cmd_agent_get(&[
                 dir.to_string_lossy().into_owned(),
                 format!("$gameVariables.value({id})"),
             ])
         }
         Some("set") => {
-            let id: u32 = args.get(2).and_then(|s| s.parse().ok()).ok_or("need <id>")?;
+            let id: u32 = args
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .ok_or("need <id>")?;
             let value = parse_json_value(args.get(3).ok_or("need <value>")?);
-            agent::send(dir, json!([{ "type": "eval", "expr": format!("$gameVariables.setValue({id}, {value})") }]))?;
+            agent::send(
+                dir,
+                json!([{ "type": "eval", "expr": format!("$gameVariables.setValue({id}, {value})") }]),
+            )?;
             println!("set variable {id} = {value}");
             Ok(())
         }
@@ -216,18 +236,30 @@ fn cmd_agent_var(args: &[String]) -> Result<(), String> {
 
 fn cmd_agent_switch(args: &[String]) -> Result<(), String> {
     let dir = game_dir(args)?;
-    let id: u32 = args.get(1).and_then(|s| s.parse().ok()).ok_or("need <id>")?;
+    let id: u32 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <id>")?;
     let on = matches!(args.get(2).map(String::as_str), Some("on" | "true" | "1"));
-    agent::send(dir, json!([{ "type": "eval", "expr": format!("$gameSwitches.setValue({id}, {on})") }]))?;
+    agent::send(
+        dir,
+        json!([{ "type": "eval", "expr": format!("$gameSwitches.setValue({id}, {on})") }]),
+    )?;
     println!("set switch {id} = {on}");
     Ok(())
 }
 
 fn cmd_agent_item(args: &[String]) -> Result<(), String> {
     let dir = game_dir(args)?;
-    let item_id: u32 = args.get(1).and_then(|s| s.parse().ok()).ok_or("need <itemId>")?;
+    let item_id: u32 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <itemId>")?;
     let count: i64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
-    agent::send(dir, json!([{ "type": "eval", "expr": format!("$gameParty.gainItem($dataItems[{item_id}], {count})") }]))?;
+    agent::send(
+        dir,
+        json!([{ "type": "eval", "expr": format!("$gameParty.gainItem($dataItems[{item_id}], {count})") }]),
+    )?;
     println!("gave item {item_id} x{count}");
     Ok(())
 }
@@ -275,7 +307,13 @@ fn cmd_agent_get(args: &[String]) -> Result<(), String> {
     agent::send(dir, json!([{ "type": "watch", "exprs": [expr] }]))?;
     std::thread::sleep(std::time::Duration::from_millis(400));
     let s = agent::state(dir)?;
-    println!("{} = {}", expr, s.get("watch").and_then(|w| w.get(&expr)).unwrap_or(&serde_json::Value::Null));
+    println!(
+        "{} = {}",
+        expr,
+        s.get("watch")
+            .and_then(|w| w.get(&expr))
+            .unwrap_or(&serde_json::Value::Null)
+    );
     Ok(())
 }
 
@@ -287,15 +325,24 @@ fn cmd_agent_set(args: &[String]) -> Result<(), String> {
     let dir = game_dir(args)?;
     let expr = args.get(1).ok_or("need <js-lvalue>")?;
     let value = parse_json_value(args.get(2).ok_or("need <json-value>")?);
-    agent::send(dir, json!([{ "type": "set", "expr": expr, "value": value }]))?;
+    agent::send(
+        dir,
+        json!([{ "type": "set", "expr": expr, "value": value }]),
+    )?;
     println!("set {expr} = {value}");
     Ok(())
 }
 
 fn cmd_agent_set_gold(args: &[String]) -> Result<(), String> {
     let dir = game_dir(args)?;
-    let amount: i64 = args.get(1).and_then(|s| s.parse().ok()).ok_or("need <amount>")?;
-    agent::send(dir, json!([{ "type": "set", "expr": "$gameParty._gold", "value": amount }]))?;
+    let amount: i64 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <amount>")?;
+    agent::send(
+        dir,
+        json!([{ "type": "set", "expr": "$gameParty._gold", "value": amount }]),
+    )?;
     println!("set gold to {amount}");
     Ok(())
 }
@@ -338,7 +385,12 @@ fn cmd_games() -> Result<(), String> {
         println!("no NW.js games found in the usual Steam folders.");
     }
     for g in games {
-        println!("{:<14} {}  ->  {}", g.engine.label(), g.name, g.path.display());
+        println!(
+            "{:<14} {}  ->  {}",
+            g.engine.label(),
+            g.name,
+            g.path.display()
+        );
     }
     Ok(())
 }
@@ -347,13 +399,20 @@ fn cmd_detect(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("need <game-dir>")?;
     let engine = detect_dir(Path::new(dir));
     println!("engine: {}", engine.label());
-    println!("nwjs: {}   rpgmaker: {}", engine.is_nwjs(), engine.is_rpgmaker());
+    println!(
+        "nwjs: {}   rpgmaker: {}",
+        engine.is_nwjs(),
+        engine.is_rpgmaker()
+    );
     Ok(())
 }
 
 fn cmd_enable(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("need <game-dir>")?;
-    let port: u16 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_PORT);
+    let port: u16 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_PORT);
     let changed = config::enable_remote_debugging(Path::new(dir), port)?;
     if changed {
         println!("enabled --remote-debugging-port={port} (backup: package.json.cheatu-bak).");
@@ -375,7 +434,10 @@ fn cmd_disable(args: &[String]) -> Result<(), String> {
 }
 
 fn connect(args: &[String]) -> Result<(Cdp, u16), String> {
-    let port: u16 = args.first().and_then(|s| s.parse().ok()).ok_or("need <port>")?;
+    let port: u16 = args
+        .first()
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <port>")?;
     Ok((Cdp::connect(port)?, port))
 }
 
@@ -417,7 +479,10 @@ fn cmd_get_gold(args: &[String]) -> Result<(), String> {
 
 fn cmd_set_gold(args: &[String]) -> Result<(), String> {
     let (mut cdp, _) = connect(args)?;
-    let amount: i64 = args.get(1).and_then(|s| s.parse().ok()).ok_or("need <amount>")?;
+    let amount: i64 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <amount>")?;
     RpgMaker::new(&mut cdp).set_gold(amount)?;
     println!("set gold to {amount}");
     Ok(())
@@ -425,8 +490,14 @@ fn cmd_set_gold(args: &[String]) -> Result<(), String> {
 
 fn cmd_set_var(args: &[String]) -> Result<(), String> {
     let (mut cdp, _) = connect(args)?;
-    let id: u32 = args.get(1).and_then(|s| s.parse().ok()).ok_or("need <id>")?;
-    let value: f64 = args.get(2).and_then(|s| s.parse().ok()).ok_or("need <value>")?;
+    let id: u32 = args
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <id>")?;
+    let value: f64 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .ok_or("need <value>")?;
     RpgMaker::new(&mut cdp).set_variable(id, value)?;
     println!("set variable {id} = {value}");
     Ok(())

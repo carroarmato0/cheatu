@@ -143,9 +143,7 @@ fn page_target(port: u16) -> Result<String, String> {
 fn http_get(port: u16, path: &str) -> Result<String, String> {
     let mut stream =
         TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );

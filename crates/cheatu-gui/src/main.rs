@@ -78,7 +78,11 @@ fn install_cjk_font(ctx: &eframe::egui::Context) {
     // Append as a fallback so the default Latin look is preserved and CJK is
     // used only for glyphs the primary font lacks.
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push("cjk".to_owned());
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("cjk".to_owned());
     }
     ctx.set_fonts(fonts);
 }
@@ -89,11 +93,23 @@ fn configure_style(ctx: &eframe::egui::Context) {
     use eframe::egui::{FontFamily, FontId, TextStyle};
     let mut style = (*ctx.style()).clone();
     style.text_styles = [
-        (TextStyle::Heading, FontId::new(20.0, FontFamily::Proportional)),
+        (
+            TextStyle::Heading,
+            FontId::new(20.0, FontFamily::Proportional),
+        ),
         (TextStyle::Body, FontId::new(15.0, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(15.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(14.0, FontFamily::Monospace)),
-        (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+        (
+            TextStyle::Button,
+            FontId::new(15.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(14.0, FontFamily::Monospace),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(12.0, FontFamily::Proportional),
+        ),
     ]
     .into();
     style.spacing.item_spacing = eframe::egui::vec2(8.0, 6.0);
@@ -385,9 +401,11 @@ impl RpgState {
                 });
         } else if self.scanned {
             ui.label(
-                egui::RichText::new("No NW.js games found in the usual Steam folders — type the path above.")
-                    .weak()
-                    .small(),
+                egui::RichText::new(
+                    "No NW.js games found in the usual Steam folders — type the path above.",
+                )
+                .weak()
+                .small(),
             );
         }
 
@@ -422,7 +440,9 @@ impl RpgState {
                     ui.colored_label(YELLOW, "agent outdated — update available");
                     if ui.button("Update agent").clicked() {
                         self.status = match agent::install(&dir) {
-                            Ok(()) => "Agent updated. Restart the game to load the new agent.".into(),
+                            Ok(()) => {
+                                "Agent updated. Restart the game to load the new agent.".into()
+                            }
                             Err(e) => format!("Update failed: {e}"),
                         };
                     }
@@ -483,8 +503,10 @@ impl RpgState {
                     }
                 } else {
                     ui.label(
-                        egui::RichText::new("Game is running, but no active save yet (title screen?).")
-                            .weak(),
+                        egui::RichText::new(
+                            "Game is running, but no active save yet (title screen?).",
+                        )
+                        .weak(),
                     );
                 }
             }
@@ -566,7 +588,10 @@ impl RpgState {
                     ui.label(egui::RichText::new("Games found under this folder:").strong());
                     for g in &self.browse_found {
                         if ui
-                            .selectable_label(false, format!("🎮 {}  ·  {}", g.name, g.engine.label()))
+                            .selectable_label(
+                                false,
+                                format!("🎮 {}  ·  {}", g.name, g.engine.label()),
+                            )
                             .clicked()
                         {
                             pick = Some(g.path.display().to_string());
@@ -791,7 +816,10 @@ impl RpgState {
             );
             let expr = self.gexpr.trim().to_string();
             let val = parse_js_value(self.gval.trim());
-            if ui.add_enabled(!expr.is_empty(), egui::Button::new("Set")).clicked() {
+            if ui
+                .add_enabled(!expr.is_empty(), egui::Button::new("Set"))
+                .clicked()
+            {
                 let _ = agent::set_expr(dir, &expr, val.clone());
             }
             let key = if self.gkey.trim().is_empty() {
@@ -881,14 +909,37 @@ impl RpgState {
         };
 
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.cat_tab, CatTab::Items, format!("Items ({})", counts.0));
-            ui.selectable_value(&mut self.cat_tab, CatTab::Weapons, format!("Weapons ({})", counts.1));
-            ui.selectable_value(&mut self.cat_tab, CatTab::Armors, format!("Armors ({})", counts.2));
-            ui.selectable_value(&mut self.cat_tab, CatTab::Variables, format!("Variables ({})", counts.3));
-            ui.selectable_value(&mut self.cat_tab, CatTab::Switches, format!("Switches ({})", counts.4));
+            ui.selectable_value(
+                &mut self.cat_tab,
+                CatTab::Items,
+                format!("Items ({})", counts.0),
+            );
+            ui.selectable_value(
+                &mut self.cat_tab,
+                CatTab::Weapons,
+                format!("Weapons ({})", counts.1),
+            );
+            ui.selectable_value(
+                &mut self.cat_tab,
+                CatTab::Armors,
+                format!("Armors ({})", counts.2),
+            );
+            ui.selectable_value(
+                &mut self.cat_tab,
+                CatTab::Variables,
+                format!("Variables ({})", counts.3),
+            );
+            ui.selectable_value(
+                &mut self.cat_tab,
+                CatTab::Switches,
+                format!("Switches ({})", counts.4),
+            );
         });
 
-        let item_tab = matches!(self.cat_tab, CatTab::Items | CatTab::Weapons | CatTab::Armors);
+        let item_tab = matches!(
+            self.cat_tab,
+            CatTab::Items | CatTab::Weapons | CatTab::Armors
+        );
         ui.horizontal(|ui| {
             ui.label("Filter:");
             ui.add(egui::TextEdit::singleline(&mut self.cat_filter).desired_width(180.0));
@@ -910,88 +961,91 @@ impl RpgState {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| match self.cat_tab {
-                        CatTab::Items | CatTab::Weapons | CatTab::Armors => {
-                            let (kind, list) = match self.cat_tab {
-                                CatTab::Weapons => {
-                                    (agent::ItemKind::Weapon, self.catalog.as_ref().unwrap().weapons.clone())
-                                }
-                                CatTab::Armors => {
-                                    (agent::ItemKind::Armor, self.catalog.as_ref().unwrap().armors.clone())
-                                }
-                                _ => (agent::ItemKind::Item, self.catalog.as_ref().unwrap().items.clone()),
-                            };
-                            let bulk: i64 = self.give_amount.trim().parse().unwrap_or(10);
-                            let mut delta: Option<(i64, i64)> = None; // (item id, amount)
-                            for e in &list {
-                                if !name_matches(&e.name) {
-                                    continue;
-                                }
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("−").on_hover_text("remove one").clicked() {
-                                        delta = Some((e.id, -1));
-                                    }
-                                    if ui.small_button("＋").on_hover_text("add one").clicked() {
-                                        delta = Some((e.id, 1));
-                                    }
-                                    if ui.button(format!("+{bulk}")).clicked() {
-                                        delta = Some((e.id, bulk));
-                                    }
-                                    ui.label(&e.name);
-                                    ui.label(egui::RichText::new(format!("×{}", e.count)).weak());
-                                });
+                CatTab::Items | CatTab::Weapons | CatTab::Armors => {
+                    let (kind, list) = match self.cat_tab {
+                        CatTab::Weapons => (
+                            agent::ItemKind::Weapon,
+                            self.catalog.as_ref().unwrap().weapons.clone(),
+                        ),
+                        CatTab::Armors => (
+                            agent::ItemKind::Armor,
+                            self.catalog.as_ref().unwrap().armors.clone(),
+                        ),
+                        _ => (
+                            agent::ItemKind::Item,
+                            self.catalog.as_ref().unwrap().items.clone(),
+                        ),
+                    };
+                    let bulk: i64 = self.give_amount.trim().parse().unwrap_or(10);
+                    let mut delta: Option<(i64, i64)> = None; // (item id, amount)
+                    for e in &list {
+                        if !name_matches(&e.name) {
+                            continue;
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.small_button("−").on_hover_text("remove one").clicked() {
+                                delta = Some((e.id, -1));
                             }
-                            // Apply after the loop, then re-request the catalog so
-                            // the counts (and any engine clamping) refresh.
-                            if let Some((id, amount)) = delta {
-                                let _ = agent::gain_item(dir, kind, id, amount);
-                                let _ = agent::request_catalog(dir);
-                                self.catalog_req_ts = now_ms();
+                            if ui.small_button("＋").on_hover_text("add one").clicked() {
+                                delta = Some((e.id, 1));
+                            }
+                            if ui.button(format!("+{bulk}")).clicked() {
+                                delta = Some((e.id, bulk));
+                            }
+                            ui.label(&e.name);
+                            ui.label(egui::RichText::new(format!("×{}", e.count)).weak());
+                        });
+                    }
+                    // Apply after the loop, then re-request the catalog so
+                    // the counts (and any engine clamping) refresh.
+                    if let Some((id, amount)) = delta {
+                        let _ = agent::gain_item(dir, kind, id, amount);
+                        let _ = agent::request_catalog(dir);
+                        self.catalog_req_ts = now_ms();
+                    }
+                }
+                CatTab::Variables => {
+                    let list = self.catalog.as_ref().unwrap().variables.clone();
+                    for e in &list {
+                        if !name_matches(&e.name) {
+                            continue;
+                        }
+                        ui.horizontal(|ui| {
+                            let buf = self
+                                .var_edits
+                                .entry(e.id)
+                                .or_insert_with(|| value_to_string(&e.value));
+                            ui.add(egui::TextEdit::singleline(buf).desired_width(80.0));
+                            if ui.button("Set").clicked() {
+                                if let Some(v) = parse_var(buf) {
+                                    let _ = agent::set_variable(dir, e.id, v);
+                                }
+                            }
+                            ui.label(format!("[{}] {}", e.id, e.name));
+                        });
+                    }
+                }
+                CatTab::Switches => {
+                    let list = self.catalog.as_ref().unwrap().switches.clone();
+                    for e in &list {
+                        if !name_matches(&e.name) {
+                            continue;
+                        }
+                        let mut on = e.value.as_bool().unwrap_or(false);
+                        if ui
+                            .checkbox(&mut on, format!("[{}] {}", e.id, e.name))
+                            .changed()
+                        {
+                            let _ = agent::set_switch(dir, e.id, on);
+                            if let Some(c) = self.catalog.as_mut() {
+                                if let Some(sw) = c.switches.iter_mut().find(|s| s.id == e.id) {
+                                    sw.value = serde_json::Value::Bool(on);
+                                }
                             }
                         }
-                        CatTab::Variables => {
-                            let list = self.catalog.as_ref().unwrap().variables.clone();
-                            for e in &list {
-                                if !name_matches(&e.name) {
-                                    continue;
-                                }
-                                ui.horizontal(|ui| {
-                                    let buf = self
-                                        .var_edits
-                                        .entry(e.id)
-                                        .or_insert_with(|| value_to_string(&e.value));
-                                    ui.add(egui::TextEdit::singleline(buf).desired_width(80.0));
-                                    if ui.button("Set").clicked() {
-                                        if let Some(v) = parse_var(buf) {
-                                            let _ = agent::set_variable(dir, e.id, v);
-                                        }
-                                    }
-                                    ui.label(format!("[{}] {}", e.id, e.name));
-                                });
-                            }
-                        }
-                        CatTab::Switches => {
-                            let list = self.catalog.as_ref().unwrap().switches.clone();
-                            for e in &list {
-                                if !name_matches(&e.name) {
-                                    continue;
-                                }
-                                let mut on = e.value.as_bool().unwrap_or(false);
-                                if ui
-                                    .checkbox(&mut on, format!("[{}] {}", e.id, e.name))
-                                    .changed()
-                                {
-                                    let _ = agent::set_switch(dir, e.id, on);
-                                    if let Some(c) = self.catalog.as_mut() {
-                                        if let Some(sw) =
-                                            c.switches.iter_mut().find(|s| s.id == e.id)
-                                        {
-                                            sw.value = serde_json::Value::Bool(on);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    }
+                }
+            });
     }
 }
 
@@ -1135,7 +1189,9 @@ impl CheatuApp {
                 NextMode::Changed => NextScan::Changed,
                 NextMode::Unchanged => NextScan::Unchanged,
             };
-            let operand = mode.needs_value().then(|| self.value_text.trim().to_string());
+            let operand = mode
+                .needs_value()
+                .then(|| self.value_text.trim().to_string());
             Job::Next(cmp, operand)
         };
 
@@ -1191,10 +1247,7 @@ impl CheatuApp {
     }
 
     fn poll_scan(&mut self) {
-        let done = self
-            .pending
-            .as_ref()
-            .and_then(|rx| rx.try_recv().ok());
+        let done = self.pending.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(outcome) = done {
             self.status = outcome.message;
             self.scanner = Some(outcome.scanner);
@@ -1306,8 +1359,7 @@ impl eframe::App for CheatuApp {
                             do_elevate = true;
                         }
                         ui.label(
-                            egui::RichText::new("limited privileges")
-                                .color(egui::Color32::YELLOW),
+                            egui::RichText::new("limited privileges").color(egui::Color32::YELLOW),
                         );
                     }
                 });
@@ -1327,58 +1379,58 @@ impl eframe::App for CheatuApp {
 
         // ---- Cheat table (right, scanner mode only) --------------------
         if self.mode == AppMode::Scanner {
-        egui::SidePanel::right("cheat_table")
-            .resizable(true)
-            .default_width(460.0)
-            .show(ctx, |ui| {
-                ui.heading("Cheat table");
-                ui.label(
-                    egui::RichText::new(
-                        "One row per address. Tick ❄ to freeze; edit Value to set it.",
-                    )
-                    .weak()
-                    .small(),
-                );
-                ui.separator();
-
-                if self.saved.is_empty() {
-                    ui.label(egui::RichText::new("No saved addresses yet.").weak());
+            egui::SidePanel::right("cheat_table")
+                .resizable(true)
+                .default_width(460.0)
+                .show(ctx, |ui| {
+                    ui.heading("Cheat table");
                     ui.label(
-                        egui::RichText::new("Use the “+” button on a scan result.")
-                            .weak()
-                            .small(),
+                        egui::RichText::new(
+                            "One row per address. Tick ❄ to freeze; edit Value to set it.",
+                        )
+                        .weak()
+                        .small(),
                     );
-                }
+                    ui.separator();
 
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for (i, entry) in self.saved.iter_mut().enumerate() {
-                            // One entry = one line, Cheat Engine style:
-                            //   [❄] description  0xADDR  ty  [value]  [🗑]
-                            // The live current value is deliberately omitted: it
-                            // changed constantly, shifting the row and making the
-                            // delete button hard to hit.
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut entry.frozen, "").on_hover_text("Freeze");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut entry.desc)
-                                        .hint_text("description")
-                                        .desired_width(96.0),
-                                );
-                                ui.monospace(format!("0x{:012x}", entry.addr));
-                                ui.label(egui::RichText::new(entry.ty.label()).weak().small());
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut entry.value_text)
-                                        .desired_width(64.0),
-                                );
-                                if ui.small_button("🗑").on_hover_text("remove").clicked() {
-                                    remove_from_table.push(i);
-                                }
-                            });
-                        }
-                    });
-            });
+                    if self.saved.is_empty() {
+                        ui.label(egui::RichText::new("No saved addresses yet.").weak());
+                        ui.label(
+                            egui::RichText::new("Use the “+” button on a scan result.")
+                                .weak()
+                                .small(),
+                        );
+                    }
+
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (i, entry) in self.saved.iter_mut().enumerate() {
+                                // One entry = one line, Cheat Engine style:
+                                //   [❄] description  0xADDR  ty  [value]  [🗑]
+                                // The live current value is deliberately omitted: it
+                                // changed constantly, shifting the row and making the
+                                // delete button hard to hit.
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut entry.frozen, "").on_hover_text("Freeze");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut entry.desc)
+                                            .hint_text("description")
+                                            .desired_width(96.0),
+                                    );
+                                    ui.monospace(format!("0x{:012x}", entry.addr));
+                                    ui.label(egui::RichText::new(entry.ty.label()).weak().small());
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut entry.value_text)
+                                            .desired_width(64.0),
+                                    );
+                                    if ui.small_button("🗑").on_hover_text("remove").clicked() {
+                                        remove_from_table.push(i);
+                                    }
+                                });
+                            }
+                        });
+                });
         }
 
         // ---- Central panel: scanner controls, or RPG Maker mode --------
@@ -1469,7 +1521,11 @@ impl eframe::App for CheatuApp {
                     {
                         do_next = true;
                     }
-                    if ui.button("New scan").on_hover_text("Clear results").clicked() {
+                    if ui
+                        .button("New scan")
+                        .on_hover_text("Clear results")
+                        .clicked()
+                    {
                         do_reset = true;
                     }
                 });
@@ -1487,10 +1543,7 @@ impl eframe::App for CheatuApp {
 
             if !attached {
                 ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Attach to a process to begin scanning.")
-                        .weak(),
-                );
+                ui.label(egui::RichText::new("Attach to a process to begin scanning.").weak());
             }
 
             ui.separator();
@@ -1498,12 +1551,9 @@ impl eframe::App for CheatuApp {
                 ui.strong(format!("{} results", self.result_count));
                 if self.result_count > self.display.len() {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "(showing first {})",
-                            self.display.len()
-                        ))
-                        .weak()
-                        .small(),
+                        egui::RichText::new(format!("(showing first {})", self.display.len()))
+                            .weak()
+                            .small(),
                     );
                 }
             });
@@ -1569,7 +1619,11 @@ impl eframe::App for CheatuApp {
                             }
                         });
                         row.col(|ui| {
-                            if ui.button("＋").on_hover_text("Add to cheat table").clicked() {
+                            if ui
+                                .button("＋")
+                                .on_hover_text("Add to cheat table")
+                                .clicked()
+                            {
                                 add_to_table.push((d.addr, ty));
                             }
                         });
@@ -1607,14 +1661,11 @@ impl eframe::App for CheatuApp {
                                 .desired_width(240.0),
                         );
                         ui.checkbox(&mut self.picker_wine_only, "Wine/Proton only");
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.button("⟳ Refresh").clicked() {
-                                    do_refresh_procs = true;
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("⟳ Refresh").clicked() {
+                                do_refresh_procs = true;
+                            }
+                        });
                     });
                     ui.label(
                         egui::RichText::new(
@@ -1642,12 +1693,12 @@ impl eframe::App for CheatuApp {
                         })
                         .collect();
                     match sort {
-                        ProcSort::Memory => {
-                            rows.sort_by_key(|p| std::cmp::Reverse(p.rss_bytes))
-                        }
+                        ProcSort::Memory => rows.sort_by_key(|p| std::cmp::Reverse(p.rss_bytes)),
                         ProcSort::Pid => rows.sort_by_key(|p| p.pid),
                         ProcSort::Name => rows.sort_by(|a, b| {
-                            a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())
+                            a.name
+                                .to_ascii_lowercase()
+                                .cmp(&b.name.to_ascii_lowercase())
                         }),
                     }
                     let count = rows.len();
@@ -1749,28 +1800,20 @@ impl eframe::App for CheatuApp {
                     // Action bar.
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{count} processes")).weak(),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.button("Cancel").clicked() {
-                                    close = true;
+                        ui.label(egui::RichText::new(format!("{count} processes")).weak());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                            if ui
+                                .add_enabled(selected.is_some(), egui::Button::new("Attach"))
+                                .clicked()
+                            {
+                                if let Some(pid) = selected {
+                                    do_attach = Some(pid);
                                 }
-                                if ui
-                                    .add_enabled(
-                                        selected.is_some(),
-                                        egui::Button::new("Attach"),
-                                    )
-                                    .clicked()
-                                {
-                                    if let Some(pid) = selected {
-                                        do_attach = Some(pid);
-                                    }
-                                }
-                            },
-                        );
+                            }
+                        });
                     });
                 });
 
@@ -1859,7 +1902,12 @@ fn pick_best_process(procs: &[ProcInfo]) -> Option<i32> {
         .iter()
         .filter(|p| p.role.as_deref() == Some("renderer"))
         .max_by_key(|p| p.rss_bytes)
-        .or_else(|| procs.iter().filter(|p| p.is_wine).max_by_key(|p| p.rss_bytes))
+        .or_else(|| {
+            procs
+                .iter()
+                .filter(|p| p.is_wine)
+                .max_by_key(|p| p.rss_bytes)
+        })
         .or_else(|| procs.iter().max_by_key(|p| p.rss_bytes))
         .map(|p| p.pid)
 }

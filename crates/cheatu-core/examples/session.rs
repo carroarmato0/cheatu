@@ -110,7 +110,10 @@ fn hold(pid: i32, value: &str, ms: u64) {
         .iter()
         .filter_map(|c| c.ty().parse(value).map(|v| (c.addr, v)))
         .collect();
-    println!("holding {} address(es) at {value} for {ms} ms…", targets.len());
+    println!(
+        "holding {} address(es) at {value} for {ms} ms…",
+        targets.len()
+    );
 
     let start = Instant::now();
     let mut writes: u64 = 0;
@@ -147,7 +150,13 @@ fn list(pid: i32, n: usize) {
             .read_typed(cand.addr, ty)
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "<gone>".into());
-        println!("0x{:012x}  {:>3}  was {}  now {}", cand.addr, ty.label(), cand.prev, cur);
+        println!(
+            "0x{:012x}  {:>3}  was {}  now {}",
+            cand.addr,
+            ty.label(),
+            cand.prev,
+            cur
+        );
     }
 }
 
@@ -165,7 +174,12 @@ fn report(scanner: &Scanner) {
 fn save(scanner: &Scanner) {
     let mut out = String::new();
     for c in scanner.results() {
-        let bytes: String = c.prev.to_ne_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let bytes: String = c
+            .prev
+            .to_ne_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         out.push_str(&format!("{:x} {} {}\n", c.addr, c.prev.ty().label(), bytes));
     }
     fs::write(session_path(), out).expect("write session file");
@@ -179,8 +193,12 @@ fn load() -> Vec<Candidate> {
         let (Some(addr), Some(ty), Some(hex)) = (it.next(), it.next(), it.next()) else {
             continue;
         };
-        let Ok(addr) = u64::from_str_radix(addr, 16) else { continue };
-        let Some(ty) = ScanType::from_label(ty) else { continue };
+        let Ok(addr) = u64::from_str_radix(addr, 16) else {
+            continue;
+        };
+        let Some(ty) = ScanType::from_label(ty) else {
+            continue;
+        };
         let bytes: Vec<u8> = (0..hex.len())
             .step_by(2)
             .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())

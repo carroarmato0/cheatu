@@ -99,7 +99,10 @@ pub enum NextScan {
 impl NextScan {
     /// Whether this comparison reads the operand value.
     pub fn needs_operand(self) -> bool {
-        matches!(self, NextScan::Eq | NextScan::Ne | NextScan::Gt | NextScan::Lt)
+        matches!(
+            self,
+            NextScan::Eq | NextScan::Ne | NextScan::Gt | NextScan::Lt
+        )
     }
 }
 
@@ -170,11 +173,10 @@ impl Scanner {
         let items = work_items(&scannable);
 
         let mut results = match scan {
-            FirstScan::Unknown(ty) => {
-                self.parallel_scan(&items, move |mem, start, end, buf, out| {
+            FirstScan::Unknown(ty) => self
+                .parallel_scan(&items, move |mem, start, end, buf, out| {
                     scan_unknown_range(mem, start, end, ty, buf, out)
-                })
-            }
+                }),
             FirstScan::Value { value, types } => {
                 // Precompute (type, target) pairs for every type that can
                 // represent the entered value.
@@ -271,12 +273,12 @@ impl Scanner {
                             };
 
                             let keep = match cmp {
-                                NextScan::Eq => {
-                                    operand.and_then(|s| ty.parse(s)).is_some_and(|t| cur.approx_eq(&t))
-                                }
-                                NextScan::Ne => {
-                                    !operand.and_then(|s| ty.parse(s)).is_some_and(|t| cur.approx_eq(&t))
-                                }
+                                NextScan::Eq => operand
+                                    .and_then(|s| ty.parse(s))
+                                    .is_some_and(|t| cur.approx_eq(&t)),
+                                NextScan::Ne => !operand
+                                    .and_then(|s| ty.parse(s))
+                                    .is_some_and(|t| cur.approx_eq(&t)),
                                 NextScan::Gt => operand_f.is_some_and(|t| cur.as_f64() > t),
                                 NextScan::Lt => operand_f.is_some_and(|t| cur.as_f64() < t),
                                 NextScan::Increased => cur.as_f64() > cand.prev.as_f64(),
@@ -317,8 +319,7 @@ impl Scanner {
         if n != size {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short read"));
         }
-        Ok(ScanValue::from_ne_bytes(ty, &buf[..size])
-            .expect("slice is exactly one value wide"))
+        Ok(ScanValue::from_ne_bytes(ty, &buf[..size]).expect("slice is exactly one value wide"))
     }
 
     /// Write `value` at `addr`.
