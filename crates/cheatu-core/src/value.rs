@@ -86,7 +86,10 @@ impl ScanType {
     }
 
     pub fn is_signed(self) -> bool {
-        matches!(self, ScanType::I8 | ScanType::I16 | ScanType::I32 | ScanType::I64)
+        matches!(
+            self,
+            ScanType::I8 | ScanType::I16 | ScanType::I32 | ScanType::I64
+        )
     }
 
     /// The signed or unsigned variant at this same byte width. A no-op for
@@ -172,14 +175,19 @@ impl ScanType {
             ScanType::F64 => ScanValue::F64(s.parse().ok()?),
             // Space-separated hex ("48 65 6C 6C 6F") if it parses as such,
             // otherwise the literal text as UTF-8 bytes.
-            ScanType::Bytes(_) => ScanValue::Bytes(parse_hex_bytes(s).unwrap_or_else(|| s.as_bytes().to_vec())),
+            ScanType::Bytes(_) => {
+                ScanValue::Bytes(parse_hex_bytes(s).unwrap_or_else(|| s.as_bytes().to_vec()))
+            }
         })
     }
 }
 
 /// Strict space-separated hex byte parse, e.g. `"48 65 6C"` -> `[0x48, 0x65, 0x6C]`.
 fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
-    let bytes: Option<Vec<u8>> = s.split_whitespace().map(|t| u8::from_str_radix(t, 16).ok()).collect();
+    let bytes: Option<Vec<u8>> = s
+        .split_whitespace()
+        .map(|t| u8::from_str_radix(t, 16).ok())
+        .collect();
     bytes.filter(|b| !b.is_empty())
 }
 
@@ -337,7 +345,10 @@ impl fmt::Display for ScanValue {
                 _ => write!(
                     f,
                     "{}",
-                    v.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+                    v.iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 ),
             },
         }

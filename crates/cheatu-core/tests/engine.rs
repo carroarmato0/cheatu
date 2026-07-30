@@ -86,7 +86,10 @@ fn undo_restores_the_pre_narrowing_candidate_set() {
     sc.first_scan(exact("42", ScanType::I32)).unwrap();
     let before = sc.count();
     assert!(sc.results().iter().any(|c| c.addr == addr));
-    assert!(!sc.can_undo(), "fresh first scan should have nothing to undo");
+    assert!(
+        !sc.can_undo(),
+        "fresh first scan should have nothing to undo"
+    );
 
     // An accidental "decreased" scan drops our unchanged address.
     black_box(&counter);
@@ -197,15 +200,13 @@ fn narrowing_by_displayed_integer_keeps_fractional_float() {
 fn parse_aob_handles_wildcards() {
     assert_eq!(
         parse_aob("48 65 ?? 6C 6F"),
-        Some(vec![
-            Some(0x48),
-            Some(0x65),
-            None,
-            Some(0x6C),
-            Some(0x6F),
-        ])
+        Some(vec![Some(0x48), Some(0x65), None, Some(0x6C), Some(0x6F),])
     );
-    assert_eq!(parse_aob("zz"), None, "invalid hex token must fail to parse");
+    assert_eq!(
+        parse_aob("zz"),
+        None,
+        "invalid hex token must fail to parse"
+    );
     assert_eq!(parse_aob(""), None, "empty pattern must fail to parse");
 }
 
@@ -330,8 +331,14 @@ fn region_for_finds_containing_region() {
         region(0x1000, 0x2000, false, "[heap]"),
         region(0x3000, 0x4000, false, "[stack]"),
     ];
-    assert_eq!(region_for(&regions, 0x1500).map(|r| r.kind()), Some(RegionKind::Heap));
-    assert_eq!(region_for(&regions, 0x3000).map(|r| r.kind()), Some(RegionKind::Stack));
+    assert_eq!(
+        region_for(&regions, 0x1500).map(|r| r.kind()),
+        Some(RegionKind::Heap)
+    );
+    assert_eq!(
+        region_for(&regions, 0x3000).map(|r| r.kind()),
+        Some(RegionKind::Stack)
+    );
     // End is exclusive; gaps return None.
     assert!(region_for(&regions, 0x2000).is_none());
     assert!(region_for(&regions, 0x9999).is_none());

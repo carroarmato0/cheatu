@@ -84,14 +84,32 @@ pub struct AddrHint {
 pub fn address_hint(kind: RegionKind, ty: ScanType) -> AddrHint {
     // A byte/string match is the display text, whatever region it sits in.
     if matches!(ty, ScanType::Bytes(_)) {
-        return AddrHint { confidence: Confidence::Unlikely, label: "text" };
+        return AddrHint {
+            confidence: Confidence::Unlikely,
+            label: "text",
+        };
     }
     match kind {
-        RegionKind::Stack => AddrHint { confidence: Confidence::Unlikely, label: "stack" },
-        RegionKind::Heap => AddrHint { confidence: Confidence::Likely, label: "heap" },
-        RegionKind::ModuleData => AddrHint { confidence: Confidence::Likely, label: "module data" },
-        RegionKind::Anonymous => AddrHint { confidence: Confidence::Neutral, label: "anon" },
-        RegionKind::Other => AddrHint { confidence: Confidence::Neutral, label: "other" },
+        RegionKind::Stack => AddrHint {
+            confidence: Confidence::Unlikely,
+            label: "stack",
+        },
+        RegionKind::Heap => AddrHint {
+            confidence: Confidence::Likely,
+            label: "heap",
+        },
+        RegionKind::ModuleData => AddrHint {
+            confidence: Confidence::Likely,
+            label: "module data",
+        },
+        RegionKind::Anonymous => AddrHint {
+            confidence: Confidence::Neutral,
+            label: "anon",
+        },
+        RegionKind::Other => AddrHint {
+            confidence: Confidence::Neutral,
+            label: "other",
+        },
     }
 }
 
@@ -565,7 +583,10 @@ fn scan_pattern_range(
 }
 
 fn pattern_matches(pattern: &[Option<u8>], data: &[u8]) -> bool {
-    pattern.iter().zip(data).all(|(p, b)| p.is_none_or(|want| want == *b))
+    pattern
+        .iter()
+        .zip(data)
+        .all(|(p, b)| p.is_none_or(|want| want == *b))
 }
 
 /// Store every aligned slot of one type in `[start, end)` (unknown value scan).

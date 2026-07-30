@@ -17,8 +17,8 @@ use cheatu_core::scan::{
     address_hint, AddrHint, Confidence, FirstScan, NextScan, Scanner, ANY_TYPES,
 };
 use cheatu_core::{
-    human_bytes, list_processes, privilege, probe_address, read_maps, region_for, Mem, ProbeOutcome,
-    ScanType, ScanValue,
+    human_bytes, list_processes, privilege, probe_address, read_maps, region_for, Mem,
+    ProbeOutcome, ScanType, ScanValue,
 };
 use cheatu_inject::{agent, detect_dir, find_rpgmaker_games, scan_dir, Engine, FoundGame};
 
@@ -1341,15 +1341,13 @@ impl CheatuApp {
                 TypeSel::Aob => match cheatu_core::parse_aob(self.value_text.trim()) {
                     Some(pattern) => Job::First(FirstScan::Pattern(pattern)),
                     None => {
-                        self.status =
-                            "Enter a byte pattern, e.g. 48 65 ?? 6C 6F.".into();
+                        self.status = "Enter a byte pattern, e.g. 48 65 ?? 6C 6F.".into();
                         self.scanner = Some(scanner);
                         return;
                     }
                 },
                 TypeSel::Str => {
-                    let pattern: Vec<Option<u8>> =
-                        self.value_text.bytes().map(Some).collect();
+                    let pattern: Vec<Option<u8>> = self.value_text.bytes().map(Some).collect();
                     if pattern.is_empty() {
                         self.status = "Enter a string to search for.".into();
                         self.scanner = Some(scanner);
@@ -1358,8 +1356,7 @@ impl CheatuApp {
                     Job::First(FirstScan::Pattern(pattern))
                 }
                 TypeSel::Any if self.unknown_initial => {
-                    self.status =
-                        "Unknown initial value needs a specific type, not “Any”.".into();
+                    self.status = "Unknown initial value needs a specific type, not “Any”.".into();
                     self.scanner = Some(scanner);
                     return;
                 }
@@ -1501,7 +1498,10 @@ impl CheatuApp {
     }
 
     fn poll_probe(&mut self) {
-        let done = self.probe_pending.as_ref().and_then(|rx| rx.try_recv().ok());
+        let done = self
+            .probe_pending
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
         if let Some((addr, outcome)) = done {
             match outcome {
                 Some(o) => {
@@ -1630,17 +1630,17 @@ impl eframe::App for CheatuApp {
                     // Attach failed for lack of ptrace rights: offer to relaunch
                     // elevated and re-attach to the same target in one click.
                     if let Some(pid) = self.needs_elevation {
-                        if !privilege::is_root() && privilege::pkexec_available() {
-                            if ui
+                        if !privilege::is_root()
+                            && privilege::pkexec_available()
+                            && ui
                                 .add(egui::Button::new("🔒 Elevate & attach"))
                                 .on_hover_text(
                                     "Relaunch with root via pkexec and re-attach to this process",
                                 )
                                 .clicked()
-                            {
-                                do_elevate = true;
-                                elevate_for = Some(pid);
-                            }
+                        {
+                            do_elevate = true;
+                            elevate_for = Some(pid);
                         }
                     }
                 }
@@ -1719,7 +1719,9 @@ impl eframe::App for CheatuApp {
                                     );
                                     ui.monospace(format!("0x{:012x}", entry.addr));
                                     ui.label(
-                                        egui::RichText::new(entry.ty.friendly_label()).weak().small(),
+                                        egui::RichText::new(entry.ty.friendly_label())
+                                            .weak()
+                                            .small(),
                                     );
                                     ui.add(
                                         egui::TextEdit::singleline(&mut entry.value_text)
@@ -1785,7 +1787,11 @@ impl eframe::App for CheatuApp {
                                         );
                                     }
                                     ui.separator();
-                                    ui.selectable_value(&mut self.type_sel, TypeSel::Aob, "Array of Bytes");
+                                    ui.selectable_value(
+                                        &mut self.type_sel,
+                                        TypeSel::Aob,
+                                        "Array of Bytes",
+                                    );
                                     ui.selectable_value(&mut self.type_sel, TypeSel::Str, "String");
                                 });
 
@@ -2012,10 +2018,8 @@ impl eframe::App for CheatuApp {
                             }
                             if enable_probe {
                                 let frozen = saved.iter().any(|e| e.addr == d.addr && e.frozen);
-                                let btn = ui.add_enabled(
-                                    !probe_busy && !frozen,
-                                    egui::Button::new("🧪"),
-                                );
+                                let btn =
+                                    ui.add_enabled(!probe_busy && !frozen, egui::Button::new("🧪"));
                                 let btn = if frozen {
                                     btn.on_disabled_hover_text("Unfreeze to probe")
                                 } else {
@@ -2179,13 +2183,11 @@ impl eframe::App for CheatuApp {
                                 });
                                 row.col(|ui| {
                                     if !p.accessible {
-                                        ui.label(
-                                            egui::RichText::new("🔒").color(warn_color(ui)),
-                                        )
-                                        .on_hover_text(
-                                            "Needs elevated access to scan (attach will \
+                                        ui.label(egui::RichText::new("🔒").color(warn_color(ui)))
+                                            .on_hover_text(
+                                                "Needs elevated access to scan (attach will \
                                              prompt to elevate)",
-                                        );
+                                            );
                                     }
                                     let mut text = egui::RichText::new(&p.name).strong();
                                     if p.is_wine {

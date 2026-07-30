@@ -68,9 +68,7 @@ pub enum RegionKind {
 // hundred rows) against a few hundred regions — linear is plenty. Switch to
 // binary if it ever shows up in a profile.
 pub fn region_for(regions: &[MemoryRegion], addr: u64) -> Option<&MemoryRegion> {
-    regions
-        .iter()
-        .find(|r| addr >= r.start && addr < r.end)
+    regions.iter().find(|r| addr >= r.start && addr < r.end)
 }
 
 /// Read and parse the memory map of `pid`.
