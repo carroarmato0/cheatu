@@ -143,7 +143,7 @@ impl Repl {
             return;
         }
         println!("requesting elevation via pkexec…");
-        let err = privilege::relaunch_elevated();
+        let err = privilege::relaunch_elevated(&[]);
         println!("could not elevate: {err}");
     }
 

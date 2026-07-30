@@ -8,7 +8,7 @@
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::maps::{read_maps, MemoryRegion};
+use crate::maps::{read_maps, MemoryRegion, RegionKind};
 use crate::mem::Mem;
 use crate::value::{ScanType, ScanValue};
 
@@ -59,6 +59,42 @@ impl Candidate {
     }
 }
 
+/// How likely a candidate is to be the authoritative game value rather than a
+/// transient or display copy. A heuristic nudge, not proof.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Confidence {
+    Likely,
+    Neutral,
+    Unlikely,
+}
+
+/// A per-address hint: a confidence level plus a short reason label.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AddrHint {
+    pub confidence: Confidence,
+    pub label: &'static str,
+}
+
+/// Rank a candidate by its memory region and type.
+///
+/// Real game state usually lives on the heap or in a module's writable data;
+/// stack addresses are transient locals, and a `Bytes` match is the on-screen
+/// text of a value rather than the value itself. This ranks by region + type
+/// only — it cannot tell two same-region, same-type candidates apart.
+pub fn address_hint(kind: RegionKind, ty: ScanType) -> AddrHint {
+    // A byte/string match is the display text, whatever region it sits in.
+    if matches!(ty, ScanType::Bytes(_)) {
+        return AddrHint { confidence: Confidence::Unlikely, label: "text" };
+    }
+    match kind {
+        RegionKind::Stack => AddrHint { confidence: Confidence::Unlikely, label: "stack" },
+        RegionKind::Heap => AddrHint { confidence: Confidence::Likely, label: "heap" },
+        RegionKind::ModuleData => AddrHint { confidence: Confidence::Likely, label: "module data" },
+        RegionKind::Anonymous => AddrHint { confidence: Confidence::Neutral, label: "anon" },
+        RegionKind::Other => AddrHint { confidence: Confidence::Neutral, label: "other" },
+    }
+}
+
 /// The comparison for an initial (first) scan.
 #[derive(Clone, Debug)]
 pub enum FirstScan {
@@ -70,6 +106,28 @@ pub enum FirstScan {
     Value { value: String, types: Vec<ScanType> },
     /// Keep every scannable address, decoded as one type (unknown value).
     Unknown(ScanType),
+    /// Match a byte pattern — `None` entries are wildcards. Used for both
+    /// Array-of-Bytes (via [`parse_aob`]) and String searches (plain UTF-8
+    /// bytes, no wildcards).
+    Pattern(Vec<Option<u8>>),
+}
+
+/// Parse a space-separated hex byte pattern such as `"48 65 ?? 6C 6F"` into
+/// match bytes, where `?`/`??` tokens are wildcards.
+///
+/// Returns `None` if any non-wildcard token isn't a valid hex byte.
+pub fn parse_aob(s: &str) -> Option<Vec<Option<u8>>> {
+    let pattern: Option<Vec<Option<u8>>> = s
+        .split_whitespace()
+        .map(|tok| {
+            if tok.chars().all(|c| c == '?') {
+                Some(None)
+            } else {
+                u8::from_str_radix(tok, 16).ok().map(Some)
+            }
+        })
+        .collect();
+    pattern.filter(|p| !p.is_empty())
 }
 
 /// The comparison for a subsequent (next) scan.
@@ -106,11 +164,19 @@ impl NextScan {
     }
 }
 
+/// How many prior candidate sets to keep for [`Scanner::undo`]. Bounded so a
+/// long narrowing session on a huge candidate set can't grow memory without
+/// limit. ponytail: bump if users want deeper undo and memory allows.
+const UNDO_DEPTH: usize = 16;
+
 /// Holds an open memory handle plus the current candidate set for one process.
 pub struct Scanner {
     mem: Mem,
     results: Vec<Candidate>,
     scanned: bool,
+    /// Snapshots of `results` taken before each narrowing/clear, newest last,
+    /// so the most recent scans can be undone.
+    history: Vec<Vec<Candidate>>,
 }
 
 impl Scanner {
@@ -120,6 +186,7 @@ impl Scanner {
             mem: Mem::open(pid)?,
             results: Vec::new(),
             scanned: false,
+            history: Vec::new(),
         })
     }
 
@@ -134,6 +201,7 @@ impl Scanner {
             mem: Mem::open(pid)?,
             results: candidates,
             scanned: true,
+            history: Vec::new(),
         })
     }
 
@@ -155,10 +223,42 @@ impl Scanner {
         &self.results
     }
 
-    /// Clear the candidate set and the "has scanned" flag.
+    /// Clear the candidate set and the "has scanned" flag. Undoable if there
+    /// was anything to clear.
     pub fn reset(&mut self) {
-        self.results.clear();
+        if !self.results.is_empty() {
+            let prev = std::mem::take(&mut self.results);
+            self.push_history(prev);
+        }
         self.scanned = false;
+    }
+
+    /// Whether [`Scanner::undo`] has a snapshot to restore.
+    pub fn can_undo(&self) -> bool {
+        !self.history.is_empty()
+    }
+
+    /// Restore the candidate set as it was before the most recent narrowing or
+    /// clear. Returns `false` if there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        match self.history.pop() {
+            // History is only populated once a first scan has happened, so the
+            // restored set always belongs to a scanned session.
+            Some(prev) => {
+                self.results = prev;
+                self.scanned = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Push a pre-change snapshot, dropping the oldest past [`UNDO_DEPTH`].
+    fn push_history(&mut self, prev: Vec<Candidate>) {
+        if self.history.len() == UNDO_DEPTH {
+            self.history.remove(0);
+        }
+        self.history.push(prev);
     }
 
     /// Run a first scan across all scannable regions.
@@ -192,12 +292,23 @@ impl Scanner {
                     })
                 }
             }
+            FirstScan::Pattern(pattern) => {
+                if pattern.is_empty() {
+                    Vec::new()
+                } else {
+                    self.parallel_scan(&items, |mem, start, end, buf, out| {
+                        scan_pattern_range(mem, start, end, &pattern, buf, out)
+                    })
+                }
+            }
         };
 
         // Threads finish out of address order; sort so display/list is stable.
         results.sort_unstable_by_key(|c| c.addr);
         self.results = results;
         self.scanned = true;
+        // A first scan starts a fresh session; earlier snapshots no longer apply.
+        self.history.clear();
         Ok(())
     }
 
@@ -273,12 +384,8 @@ impl Scanner {
                             };
 
                             let keep = match cmp {
-                                NextScan::Eq => operand
-                                    .and_then(|s| ty.parse(s))
-                                    .is_some_and(|t| cur.approx_eq(&t)),
-                                NextScan::Ne => !operand
-                                    .and_then(|s| ty.parse(s))
-                                    .is_some_and(|t| cur.approx_eq(&t)),
+                                NextScan::Eq => operand.is_some_and(|s| eq_operand(&cur, ty, s)),
+                                NextScan::Ne => !operand.is_some_and(|s| eq_operand(&cur, ty, s)),
                                 NextScan::Gt => operand_f.is_some_and(|t| cur.as_f64() > t),
                                 NextScan::Lt => operand_f.is_some_and(|t| cur.as_f64() < t),
                                 NextScan::Increased => cur.as_f64() > cand.prev.as_f64(),
@@ -307,7 +414,10 @@ impl Scanner {
             all
         });
 
-        self.results = kept;
+        // Move the pre-scan set into history (no clone) so this narrowing can
+        // be undone, e.g. after an accidental "Decreased" that matched nothing.
+        let prev = std::mem::replace(&mut self.results, kept);
+        self.push_history(prev);
         Ok(())
     }
 
@@ -342,6 +452,28 @@ fn work_items(regions: &[MemoryRegion]) -> Vec<(u64, u64)> {
         }
     }
     items
+}
+
+/// Equality of a freshly-read value against a user-typed operand during a
+/// next scan.
+///
+/// Normally exact-per-type via [`ScanValue::approx_eq`]. The exception: a
+/// **float** candidate compared against a **whole number** is treated as the
+/// value the game *displays* — HP shown as `199` is really a float somewhere in
+/// `[198, 200)` once regen/buffs leave a fraction. Without this, narrowing an
+/// "Any" scan by the on-screen integer culls the real fractional float while
+/// its whole-number display-mirrors survive (which then freeze to no effect).
+/// Type a decimal (`199.0`) to force an exact float match instead.
+fn eq_operand(cur: &ScanValue, ty: ScanType, operand: &str) -> bool {
+    let is_float = matches!(ty, ScanType::F32 | ScanType::F64);
+    if is_float && !operand.contains('.') {
+        if let Ok(n) = operand.trim().parse::<f64>() {
+            // ponytail: ±1.0 window survives floor/round/ceil display; the
+            // intersection across successive narrowing rounds tightens it.
+            return (cur.as_f64() - n).abs() < 1.0;
+        }
+    }
+    ty.parse(operand).is_some_and(|t| cur.approx_eq(&t))
 }
 
 /// Scan `[start, end)` for concrete `targets`, appending hits to `out`.
@@ -384,6 +516,56 @@ fn scan_value_range(
         }
         addr += if usable > 0 { usable as u64 } else { n as u64 };
     }
+}
+
+/// Scan `[start, end)` for `pattern`, where `None` entries are wildcard bytes.
+///
+/// Consecutive chunk reads overlap by `pattern.len() - 1` bytes so a match
+/// straddling a chunk boundary is never missed or double-counted.
+///
+/// Naive byte-by-byte comparison — fine for typical AoB/string pattern
+/// lengths; swap in a Boyer-Moore-style skip if long patterns over huge
+/// regions turn out to be a bottleneck.
+fn scan_pattern_range(
+    mem: &Mem,
+    start: u64,
+    end: u64,
+    pattern: &[Option<u8>],
+    buf: &mut [u8],
+    out: &mut Vec<Candidate>,
+) {
+    let plen = pattern.len();
+    if plen == 0 || (end - start) < plen as u64 {
+        return;
+    }
+    let mut addr = start;
+    while addr < end {
+        let want = ((end - addr) as usize).min(buf.len());
+        let n = match mem.read_at(addr, &mut buf[..want]) {
+            Ok(n) if n > 0 => n,
+            _ => {
+                addr += want as u64;
+                continue;
+            }
+        };
+        if n >= plen {
+            for (off, window) in buf[..n].windows(plen).enumerate() {
+                if pattern_matches(pattern, window) {
+                    out.push(Candidate {
+                        addr: addr + off as u64,
+                        prev: ScanValue::Bytes(window.to_vec()),
+                    });
+                }
+            }
+            addr += (n - (plen - 1)) as u64;
+        } else {
+            addr += n as u64;
+        }
+    }
+}
+
+fn pattern_matches(pattern: &[Option<u8>], data: &[u8]) -> bool {
+    pattern.iter().zip(data).all(|(p, b)| p.is_none_or(|want| want == *b))
 }
 
 /// Store every aligned slot of one type in `[start, end)` (unknown value scan).

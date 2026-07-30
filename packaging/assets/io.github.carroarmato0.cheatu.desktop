@@ -9,4 +9,4 @@ Terminal=false
 Categories=Utility;
 Keywords=cheat;memory;scanner;debug;game;trainer;
 StartupNotify=true
-StartupWMClass=cheatu-gui
+StartupWMClass=io.github.carroarmato0.cheatu

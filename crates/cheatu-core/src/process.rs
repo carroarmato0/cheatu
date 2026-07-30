@@ -21,6 +21,9 @@ pub struct ProcInfo {
     /// This is the key to games like RPG Maker MV/MZ (NW.js): the game's data
     /// lives in the largest `renderer`.
     pub role: Option<String>,
+    /// Whether `/proc/<pid>/mem` is readable now, i.e. scanning would work
+    /// without elevation. `false` means attaching needs root/`CAP_SYS_PTRACE`.
+    pub accessible: bool,
 }
 
 impl ProcInfo {
@@ -107,6 +110,7 @@ pub fn list_processes() -> Vec<ProcInfo> {
             role: detect_role(&cmdline),
             is_wine,
             rss_bytes: read_rss(pid, page_size),
+            accessible: crate::mem::accessible(pid),
             name: comm,
             cmdline,
         });

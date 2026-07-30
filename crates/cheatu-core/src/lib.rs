@@ -19,8 +19,10 @@ pub mod process;
 pub mod scan;
 pub mod value;
 
-pub use maps::{read_maps, MemoryRegion};
-pub use mem::Mem;
+pub use maps::{read_maps, region_for, MemoryRegion, RegionKind};
+pub use mem::{probe_address, Mem, ProbeOutcome};
 pub use process::{human_bytes, list_processes, resume, suspend, ProcInfo};
-pub use scan::{FirstScan, NextScan, Scanner, ANY_TYPES};
+pub use scan::{
+    address_hint, parse_aob, AddrHint, Confidence, FirstScan, NextScan, Scanner, ANY_TYPES,
+};
 pub use value::{ScanType, ScanValue};

@@ -13,12 +13,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cheatu_core::process::ProcInfo;
-use cheatu_core::scan::{FirstScan, NextScan, Scanner, ANY_TYPES};
-use cheatu_core::{human_bytes, list_processes, privilege, Mem, ScanType, ScanValue};
+use cheatu_core::scan::{
+    address_hint, AddrHint, Confidence, FirstScan, NextScan, Scanner, ANY_TYPES,
+};
+use cheatu_core::{
+    human_bytes, list_processes, privilege, probe_address, read_maps, region_for, Mem, ProbeOutcome,
+    ScanType, ScanValue,
+};
 use cheatu_inject::{agent, detect_dir, find_rpgmaker_games, scan_dir, Engine, FoundGame};
 
 /// How often the background freeze thread rewrites frozen values.
 const FREEZE_INTERVAL: Duration = Duration::from_millis(40);
+
+/// How long the auto-probe lets the target run after writing its sentinel
+/// before reading back — a couple of frames. Tunable knob.
+const PROBE_WAIT: Duration = Duration::from_millis(200);
 
 /// Shared state driving the background freeze thread. The UI updates it each
 /// frame; the thread reads it and writes the values into the target — so
@@ -35,18 +44,37 @@ struct FreezeShared {
 /// but building the snapshot for millions of hits would still be wasteful).
 const MAX_DISPLAY: usize = 2000;
 
+/// Only compute the "real value" hint once the candidate set is narrow enough
+/// to be worth eyeballing. On a huge un-narrowed list nearly every row would
+/// read "heap/anon" — noise, not signal — so we skip the maps read entirely
+/// above this count.
+const HINT_THRESHOLD: usize = 200;
+
 /// Set by build.rs: the git tag when built exactly on one, else the short
 /// commit hash, else the crate version (tarball builds without .git).
 const VERSION: &str = env!("CHEATU_VERSION");
 
 fn main() -> eframe::Result<()> {
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([1100.0, 700.0])
+        // Wide enough for the full header row (tabs, attach status,
+        // settings/about buttons) without squishing.
+        .with_min_inner_size([960.0, 540.0])
+        .with_title("cheatu")
+        // Match the installed .desktop file's basename so GNOME (Wayland) and
+        // other desktops associate the window with it and show its icon in the
+        // taskbar/dock. Also sets the X11 WM_CLASS.
+        .with_app_id("io.github.carroarmato0.cheatu");
+    // A window icon for environments that use per-window icons (X11, title
+    // bars, most non-GNOME docks). GNOME on Wayland ignores this and uses the
+    // .desktop icon matched via app_id above instead.
+    if let Ok(icon) =
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/cheatu-icon-256.png"))
+    {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 700.0])
-            // Wide enough for the full header row (tabs, attach status,
-            // settings/about buttons) without squishing.
-            .with_min_inner_size([960.0, 540.0])
-            .with_title("cheatu"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -55,45 +83,54 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             // Needed to render the SVG logo in the About window.
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            install_cjk_font(&cc.egui_ctx);
+            install_fonts(&cc.egui_ctx);
             configure_style(&cc.egui_ctx);
             let theme = load_theme();
             apply_theme(&cc.egui_ctx, theme);
             Ok(Box::new(CheatuApp {
                 pause_while_scanning: true,
                 theme,
+                // Set when we were relaunched elevated for a specific target;
+                // attached on the first frame so the user lands back on scanning.
+                pending_attach: privilege::attach_target(),
                 ..Default::default()
             }))
         }),
     )
 }
 
-/// Load a CJK-capable system font as a fallback so Japanese/Chinese/Korean text
-/// (common in RPG Maker game data) renders instead of empty boxes. egui's
-/// built-in font is Latin-only. Best-effort: if no CJK font is found, non-Latin
-/// glyphs simply stay as tofu.
-fn install_cjk_font(ctx: &eframe::egui::Context) {
+/// Register fonts as fallbacks after egui's default Latin font:
+///
+/// 1. A small **bundled** monochrome icon font (a subset of Noto Emoji, OFL) so
+///    the UI's glyphs (🧪 🔒 🔍 …) render reliably. egui only rasterizes
+///    monochrome outlines and can't be trusted to find a system font covering
+///    newer emoji; baking the font into the binary also survives being
+///    relaunched elevated via pkexec, where the font environment differs.
+/// 2. A CJK system font (best-effort) so Japanese/Chinese/Korean RPG Maker text
+///    renders instead of empty boxes.
+///
+/// Regenerate the icon font with `assets/regen-icons.sh` when adding new glyphs.
+fn install_fonts(ctx: &eframe::egui::Context) {
     use eframe::egui::{FontData, FontDefinitions, FontFamily};
 
-    let Some(path) = cjk_font_path() else {
-        return;
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return;
-    };
-
     let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("cjk".to_owned(), FontData::from_owned(bytes));
-    // Append as a fallback so the default Latin look is preserved and CJK is
-    // used only for glyphs the primary font lacks.
-    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+    fonts.font_data.insert(
+        "icons".to_owned(),
+        FontData::from_static(include_bytes!("../assets/CheatuIcons.ttf")),
+    );
+    if let Some(bytes) = cjk_font_path().and_then(|p| std::fs::read(&p).ok()) {
         fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("cjk".to_owned());
+            .font_data
+            .insert("cjk".to_owned(), FontData::from_owned(bytes));
+    }
+
+    let has_cjk = fonts.font_data.contains_key("cjk");
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        let fam = fonts.families.entry(family).or_default();
+        fam.push("icons".to_owned());
+        if has_cjk {
+            fam.push("cjk".to_owned());
+        }
     }
     ctx.set_fonts(fonts);
 }
@@ -317,6 +354,23 @@ enum ProcSort {
 struct DisplayRow {
     addr: u64,
     prev: ScanValue,
+    /// "Real value" hint, when the result set is narrow enough to compute it
+    /// (see [`HINT_THRESHOLD`]). `None` renders as a muted "—".
+    hint: Option<AddrHint>,
+}
+
+/// Human explanation for a candidate's "real value" hint, shown on hover.
+fn hint_tooltip(h: &AddrHint) -> &'static str {
+    match (h.confidence, h.label) {
+        (_, "text") => "The on-screen text of the value, not the value itself.",
+        (Confidence::Unlikely, "stack") => "Likely a transient stack copy, not the stored value.",
+        (Confidence::Likely, "heap") => "Likely the real value — heap-allocated game state.",
+        (Confidence::Likely, "module data") => {
+            "Likely the real value — a global in a module's data."
+        }
+        (Confidence::Neutral, _) => "Could be the real value or a copy — region is inconclusive.",
+        _ => "Heuristic guess from the address's memory region and type.",
+    }
 }
 
 /// One entry in the bottom "cheat table".
@@ -340,11 +394,14 @@ enum Job {
     Next(NextScan, Option<String>),
 }
 
-/// The value-type selection in the UI: a single width, or "Any" (unknown type).
+/// The value-type selection in the UI: a numeric width, a byte/string
+/// pattern search, or "Any" (unknown numeric type).
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum TypeSel {
     Any,
     One(ScanType),
+    Aob,
+    Str,
 }
 
 impl Default for TypeSel {
@@ -354,22 +411,13 @@ impl Default for TypeSel {
 }
 
 impl TypeSel {
-    fn label(self) -> String {
-        match self {
-            TypeSel::Any => "Any (unknown type)".to_string(),
-            TypeSel::One(t) => t.label().to_string(),
-        }
-    }
-
-    fn is_any(self) -> bool {
-        matches!(self, TypeSel::Any)
-    }
-
     /// The types a first scan should try for this selection.
     fn types(self) -> Vec<ScanType> {
         match self {
             TypeSel::Any => ANY_TYPES.to_vec(),
             TypeSel::One(t) => vec![t],
+            // Handled directly in `start_scan` via `FirstScan::Pattern`.
+            TypeSel::Aob | TypeSel::Str => Vec::new(),
         }
     }
 }
@@ -686,7 +734,7 @@ impl RpgState {
                 ui.label(egui::RichText::new(self.browse_cwd.display().to_string()).monospace());
                 if cwd_engine.is_nwjs()
                     && ui
-                        .button(format!("✓ Use this folder — {}", cwd_engine.label()))
+                        .button(format!("Use this folder — {}", cwd_engine.label()))
                         .clicked()
                 {
                     pick = Some(self.browse_cwd.display().to_string());
@@ -1178,6 +1226,11 @@ struct CheatuApp {
 
     scanner: Option<Scanner>,
     attached: Option<(i32, String)>,
+    /// Pid to attach to on the next frame (from a `--attach` relaunch arg).
+    pending_attach: Option<i32>,
+    /// Pid whose attach failed on permissions — drives the "Elevate & attach"
+    /// prompt. Cleared on any successful attach.
+    needs_elevation: Option<i32>,
 
     // Process picker.
     show_picker: bool,
@@ -1198,11 +1251,24 @@ struct CheatuApp {
     // Results.
     display: Vec<DisplayRow>,
     result_count: usize,
+    /// Whether to show the "real value" Hint column — true only for a narrowed
+    /// numeric result set (hidden for huge lists and for AoB/string scans, where
+    /// a `Bytes` match is the goal, not a demoted "text" hit).
+    show_hints: bool,
 
     // Background scan.
     pending: Option<Receiver<ScanOutcome>>,
     scanning: bool,
     status: String,
+
+    // Background probe (active "which one sticks" disambiguation).
+    /// In-flight probe result, if any. `None` outcome = the probe failed
+    /// (e.g. memory not writable), so the busy state still clears.
+    probe_pending: Option<Receiver<(u64, Option<ProbeOutcome>)>>,
+    /// Address currently being probed (disables further probes meanwhile).
+    probing: Option<u64>,
+    /// Latest probe outcome per address, shown as an icon in the results row.
+    probe_results: HashMap<u64, ProbeOutcome>,
 
     // Cheat table.
     saved: Vec<SavedEntry>,
@@ -1215,6 +1281,9 @@ struct CheatuApp {
     theme: Theme,
     show_about: bool,
     show_settings: bool,
+    /// Opt-in to the destructive auto-probe (writes to live target memory).
+    /// Off by default each run — the safe default.
+    enable_probe: bool,
 }
 
 impl CheatuApp {
@@ -1235,16 +1304,23 @@ impl CheatuApp {
                     .unwrap_or_else(|| "?".into());
                 self.attached = Some((pid, name));
                 self.scanner = Some(s);
+                self.needs_elevation = None;
                 self.display.clear();
                 self.result_count = 0;
                 self.status = format!("Attached to pid {pid}.");
             }
             Err(e) => {
-                let mut msg = format!("Failed to attach to pid {pid}: {e}.");
+                // A permission error on a same-user process means we lack ptrace
+                // rights (restrictive yama scope) — offer to relaunch elevated
+                // and re-attach. Any other error isn't fixed by elevation.
                 if e.kind() == std::io::ErrorKind::PermissionDenied && !privilege::is_root() {
-                    msg.push_str(" Try \"Request root access\".");
+                    self.needs_elevation = Some(pid);
+                    self.status =
+                        format!("pid {pid} needs elevated access — use \"Elevate & attach\".");
+                } else {
+                    self.needs_elevation = None;
+                    self.status = format!("Failed to attach to pid {pid}: {e}.");
                 }
-                self.status = msg;
             }
         }
     }
@@ -1261,25 +1337,42 @@ impl CheatuApp {
         let value_is_number = self.value_text.trim().parse::<f64>().is_ok();
 
         let job = if first {
-            if self.unknown_initial {
-                match self.type_sel {
-                    TypeSel::One(t) => Job::First(FirstScan::Unknown(t)),
-                    TypeSel::Any => {
+            match self.type_sel {
+                TypeSel::Aob => match cheatu_core::parse_aob(self.value_text.trim()) {
+                    Some(pattern) => Job::First(FirstScan::Pattern(pattern)),
+                    None => {
                         self.status =
-                            "Unknown initial value needs a specific type, not “Any”.".into();
+                            "Enter a byte pattern, e.g. 48 65 ?? 6C 6F.".into();
                         self.scanner = Some(scanner);
                         return;
                     }
+                },
+                TypeSel::Str => {
+                    let pattern: Vec<Option<u8>> =
+                        self.value_text.bytes().map(Some).collect();
+                    if pattern.is_empty() {
+                        self.status = "Enter a string to search for.".into();
+                        self.scanner = Some(scanner);
+                        return;
+                    }
+                    Job::First(FirstScan::Pattern(pattern))
                 }
-            } else if value_is_number {
-                Job::First(FirstScan::Value {
+                TypeSel::Any if self.unknown_initial => {
+                    self.status =
+                        "Unknown initial value needs a specific type, not “Any”.".into();
+                    self.scanner = Some(scanner);
+                    return;
+                }
+                TypeSel::One(t) if self.unknown_initial => Job::First(FirstScan::Unknown(t)),
+                _ if value_is_number => Job::First(FirstScan::Value {
                     value: self.value_text.trim().to_string(),
                     types: self.type_sel.types(),
-                })
-            } else {
-                self.status = "Enter a value to scan for.".into();
-                self.scanner = Some(scanner);
-                return;
+                }),
+                _ => {
+                    self.status = "Enter a value to scan for.".into();
+                    self.scanner = Some(scanner);
+                    return;
+                }
             }
         } else {
             if !scanner.has_scanned() {
@@ -1340,12 +1433,38 @@ impl CheatuApp {
 
     fn rebuild_display(&mut self) {
         self.display.clear();
+        self.show_hints = false;
         if let Some(scanner) = &self.scanner {
             self.result_count = scanner.count();
+
+            // A `Bytes` result set is an AoB/string scan — the hint doesn't
+            // apply (a text match is the goal there). Otherwise, once narrowed,
+            // read the target's maps once and rank each candidate by region.
+            let is_pattern = scanner
+                .results()
+                .first()
+                .is_some_and(|c| matches!(c.ty(), ScanType::Bytes(_)));
+            let regions = (!is_pattern && scanner.count() <= HINT_THRESHOLD)
+                .then(|| read_maps(scanner.pid()).ok())
+                .flatten();
+            self.show_hints = regions.is_some();
+
             for cand in scanner.results().iter().take(MAX_DISPLAY) {
+                let hint = regions.as_ref().map(|regs| {
+                    let kind = region_for(regs, cand.addr).map(|r| r.kind());
+                    match kind {
+                        Some(kind) => address_hint(kind, cand.ty()),
+                        // Address not in any current region (freed/moved).
+                        None => AddrHint {
+                            confidence: Confidence::Neutral,
+                            label: "?",
+                        },
+                    }
+                });
                 self.display.push(DisplayRow {
                     addr: cand.addr,
-                    prev: cand.prev,
+                    prev: cand.prev.clone(),
+                    hint,
                 });
             }
         }
@@ -1360,6 +1479,16 @@ impl CheatuApp {
         self.status = "Candidate list cleared.".into();
     }
 
+    fn undo_scan(&mut self) {
+        let undone = self.scanner.as_mut().is_some_and(|s| s.undo());
+        if undone {
+            self.rebuild_display();
+            self.status = format!("Undone. {} results.", self.result_count);
+        } else {
+            self.status = "Nothing to undo.".into();
+        }
+    }
+
     fn poll_scan(&mut self) {
         let done = self.pending.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(outcome) = done {
@@ -1368,6 +1497,30 @@ impl CheatuApp {
             self.scanning = false;
             self.pending = None;
             self.rebuild_display();
+        }
+    }
+
+    fn poll_probe(&mut self) {
+        let done = self.probe_pending.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some((addr, outcome)) = done {
+            match outcome {
+                Some(o) => {
+                    self.status = match o {
+                        ProbeOutcome::Held => {
+                            format!("0x{addr:012x} held — likely the real value.")
+                        }
+                        ProbeOutcome::Reverted => {
+                            format!("0x{addr:012x} reverted — a live copy, probably not it.")
+                        }
+                    };
+                    self.probe_results.insert(addr, o);
+                }
+                None => {
+                    self.status = format!("Probe of 0x{addr:012x} failed — memory not writable?");
+                }
+            }
+            self.probing = None;
+            self.probe_pending = None;
         }
     }
 
@@ -1429,17 +1582,28 @@ impl eframe::App for CheatuApp {
 
         self.ensure_freeze_thread();
         self.poll_scan();
+        self.poll_probe();
         self.sync_freezes();
+
+        // Re-attach to the target we were relaunched (elevated) for.
+        if let Some(pid) = self.pending_attach.take() {
+            self.attach(pid);
+        }
 
         // Deferred actions, so UI closures never need to call &mut self methods.
         let mut do_attach: Option<i32> = None;
         let mut do_first = false;
         let mut do_next = false;
         let mut do_reset = false;
+        let mut do_undo = false;
         let mut do_elevate = false;
+        // Some(pid) to elevate-then-attach; None for a plain elevation request.
+        let mut elevate_for: Option<i32> = None;
         let mut do_refresh_procs = false;
         let mut add_to_table: Vec<(u64, ScanType)> = Vec::new();
         let mut remove_from_table: Vec<usize> = Vec::new();
+        // (addr, size) of a candidate to auto-probe.
+        let mut do_probe: Option<(u64, usize)> = None;
 
         // ---- Header -----------------------------------------------------
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -1463,6 +1627,22 @@ impl eframe::App for CheatuApp {
                         do_refresh_procs = true;
                         self.show_picker = true;
                     }
+                    // Attach failed for lack of ptrace rights: offer to relaunch
+                    // elevated and re-attach to the same target in one click.
+                    if let Some(pid) = self.needs_elevation {
+                        if !privilege::is_root() && privilege::pkexec_available() {
+                            if ui
+                                .add(egui::Button::new("🔒 Elevate & attach"))
+                                .on_hover_text(
+                                    "Relaunch with root via pkexec and re-attach to this process",
+                                )
+                                .clicked()
+                            {
+                                do_elevate = true;
+                                elevate_for = Some(pid);
+                            }
+                        }
+                    }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1474,7 +1654,7 @@ impl eframe::App for CheatuApp {
                     }
                     ui.separator();
                     if privilege::is_root() {
-                        ui.label(egui::RichText::new("root ✓").color(ok_color(ui)));
+                        ui.label(egui::RichText::new("root").color(ok_color(ui)));
                     } else {
                         if ui.button("Request root access").clicked() {
                             do_elevate = true;
@@ -1538,7 +1718,9 @@ impl eframe::App for CheatuApp {
                                             .desired_width(96.0),
                                     );
                                     ui.monospace(format!("0x{:012x}", entry.addr));
-                                    ui.label(egui::RichText::new(entry.ty.label()).weak().small());
+                                    ui.label(
+                                        egui::RichText::new(entry.ty.friendly_label()).weak().small(),
+                                    );
                                     ui.add(
                                         egui::TextEdit::singleline(&mut entry.value_text)
                                             .desired_width(64.0),
@@ -1567,40 +1749,72 @@ impl eframe::App for CheatuApp {
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
                         ui.label("Value type");
-                        egui::ComboBox::from_id_salt("scan_type")
-                            .selected_text(self.type_sel.label())
-                            .width(180.0)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.type_sel,
-                                    TypeSel::Any,
-                                    "Any (unknown type)",
-                                )
-                                .on_hover_text(
-                                    "Try the value as i32/u32/i64/u64/f32/f64 at once — \
-                                     use this when you don't know the type.",
-                                );
-                                ui.separator();
-                                for t in ScanType::ALL {
+                        ui.horizontal(|ui| {
+                            let selected_text = match self.type_sel {
+                                TypeSel::Any => "Any (unknown type)".to_string(),
+                                TypeSel::One(t) => t.friendly_label(),
+                                TypeSel::Aob => "Array of Bytes".to_string(),
+                                TypeSel::Str => "String".to_string(),
+                            };
+                            egui::ComboBox::from_id_salt("scan_type")
+                                .selected_text(selected_text)
+                                .width(140.0)
+                                .show_ui(ui, |ui| {
                                     ui.selectable_value(
                                         &mut self.type_sel,
-                                        TypeSel::One(t),
-                                        t.label(),
+                                        TypeSel::Any,
+                                        "Any (unknown type)",
+                                    )
+                                    .on_hover_text(
+                                        "Try the value as i32/u32/i64/u64/f32/f64 at once — \
+                                         use this when you don't know the type.",
                                     );
+                                    ui.separator();
+                                    for t in ScanType::SIZE_GROUPS {
+                                        // Keep the current sign when just switching size.
+                                        let signed = match self.type_sel {
+                                            TypeSel::One(cur) if cur.with_sign(true) == t => {
+                                                cur.is_signed()
+                                            }
+                                            _ => true,
+                                        };
+                                        ui.selectable_value(
+                                            &mut self.type_sel,
+                                            TypeSel::One(t.with_sign(signed)),
+                                            t.friendly_label(),
+                                        );
+                                    }
+                                    ui.separator();
+                                    ui.selectable_value(&mut self.type_sel, TypeSel::Aob, "Array of Bytes");
+                                    ui.selectable_value(&mut self.type_sel, TypeSel::Str, "String");
+                                });
+
+                            if let TypeSel::One(t) = self.type_sel {
+                                if !t.is_float() {
+                                    let mut signed = t.is_signed();
+                                    if ui.checkbox(&mut signed, "Signed").changed() {
+                                        self.type_sel = TypeSel::One(t.with_sign(signed));
+                                    }
                                 }
-                            });
+                            }
+                        });
                         ui.end_row();
 
                         ui.label("Value");
                         ui.horizontal(|ui| {
+                            let hint = match self.type_sel {
+                                TypeSel::Aob => "hex bytes, wildcards as ??, e.g. 48 65 ?? 6C 6F",
+                                TypeSel::Str => "the text you see in-game, e.g. Player1",
+                                _ => "the number you see in-game, e.g. 100",
+                            };
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.value_text)
-                                    .hint_text("the number you see in-game, e.g. 100")
+                                    .hint_text(hint)
                                     .desired_width(200.0),
                             );
-                            // Unknown-initial-value needs a concrete width.
+                            // Unknown-initial-value needs a concrete numeric width.
                             ui.add_enabled(
-                                !self.type_sel.is_any(),
+                                matches!(self.type_sel, TypeSel::One(_)),
                                 egui::Checkbox::new(
                                     &mut self.unknown_initial,
                                     "Unknown initial value",
@@ -1647,6 +1861,15 @@ impl eframe::App for CheatuApp {
                     {
                         do_reset = true;
                     }
+                    let can_undo =
+                        !self.scanning && self.scanner.as_ref().is_some_and(|s| s.can_undo());
+                    if ui
+                        .add_enabled(can_undo, egui::Button::new("↶ Undo"))
+                        .on_hover_text("Restore the results from before the last scan")
+                        .clicked()
+                    {
+                        do_undo = true;
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -1681,13 +1904,27 @@ impl eframe::App for CheatuApp {
             // "Any" scans show a mix of i32/f32/… hits with the right decoding.
             use egui_extras::{Column, TableBuilder};
             let scanner_ref = self.scanner.as_ref();
-            TableBuilder::new(ui)
+            // Hidden for huge lists and AoB/string scans; see `rebuild_display`.
+            let show_hints = self.show_hints;
+            // Auto-probe state, hoisted so the row closure needn't borrow &mut self.
+            let enable_probe = self.enable_probe;
+            let probe_busy = self.scanning || self.probing.is_some();
+            let probe_results = &self.probe_results;
+            let saved = &self.saved;
+            let mut table = TableBuilder::new(ui)
                 .striped(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::auto().at_least(150.0))
-                .column(Column::auto().at_least(48.0))
-                .column(Column::auto().at_least(90.0))
-                .column(Column::auto().at_least(90.0))
+                // Fixed widths (not `auto`) so a constantly-changing float in
+                // "Current" can't reflow the row and make the ＋ button jump.
+                // `clip` truncates over-long values instead of widening the cell.
+                .column(Column::exact(150.0))
+                .column(Column::exact(90.0).clip(true))
+                .column(Column::exact(120.0).clip(true))
+                .column(Column::exact(120.0).clip(true));
+            if show_hints {
+                table = table.column(Column::exact(130.0).clip(true));
+            }
+            table
                 .column(Column::remainder())
                 .header(20.0, |mut header| {
                     header.col(|ui| {
@@ -1702,6 +1939,15 @@ impl eframe::App for CheatuApp {
                     header.col(|ui| {
                         ui.strong("Current");
                     });
+                    if show_hints {
+                        header.col(|ui| {
+                            ui.strong("Hint").on_hover_text(
+                                "Heuristic guess at which candidate is the real game value, \
+                                 from its memory region and type. A nudge, not proof — it can't \
+                                 tell apart two candidates in the same region.",
+                            );
+                        });
+                    }
                     header.col(|ui| {
                         ui.strong("");
                     });
@@ -1715,7 +1961,7 @@ impl eframe::App for CheatuApp {
                             ui.monospace(format!("0x{:012x}", d.addr));
                         });
                         row.col(|ui| {
-                            ui.label(egui::RichText::new(ty.label()).weak());
+                            ui.label(egui::RichText::new(ty.friendly_label()).weak());
                         });
                         row.col(|ui| {
                             ui.monospace(d.prev.to_string());
@@ -1737,6 +1983,25 @@ impl eframe::App for CheatuApp {
                                 }
                             }
                         });
+                        if show_hints {
+                            row.col(|ui| match &d.hint {
+                                Some(h) => {
+                                    // Filled ● for a likely-real value, hollow ○
+                                    // (weak) otherwise, matching the mockup.
+                                    let text = if h.confidence == Confidence::Likely {
+                                        egui::RichText::new(format!("● {}", h.label))
+                                            .small()
+                                            .color(egui::Color32::from_rgb(0x4c, 0xaf, 0x50))
+                                    } else {
+                                        egui::RichText::new(format!("○ {}", h.label)).small().weak()
+                                    };
+                                    ui.label(text).on_hover_text(hint_tooltip(h));
+                                }
+                                None => {
+                                    ui.label(egui::RichText::new("—").weak());
+                                }
+                            });
+                        }
                         row.col(|ui| {
                             if ui
                                 .button("＋")
@@ -1744,6 +2009,46 @@ impl eframe::App for CheatuApp {
                                 .clicked()
                             {
                                 add_to_table.push((d.addr, ty));
+                            }
+                            if enable_probe {
+                                let frozen = saved.iter().any(|e| e.addr == d.addr && e.frozen);
+                                let btn = ui.add_enabled(
+                                    !probe_busy && !frozen,
+                                    egui::Button::new("🧪"),
+                                );
+                                let btn = if frozen {
+                                    btn.on_disabled_hover_text("Unfreeze to probe")
+                                } else {
+                                    btn.on_hover_text(
+                                        "Probe: write a test value, wait, read back. \
+                                         A live copy reverts; the real value holds. \
+                                         Writes to live game memory.",
+                                    )
+                                };
+                                if btn.clicked() {
+                                    do_probe = Some((d.addr, ty.size()));
+                                }
+                            }
+                            match probe_results.get(&d.addr) {
+                                Some(ProbeOutcome::Held) => {
+                                    ui.label(
+                                        egui::RichText::new("✓ holds")
+                                            .small()
+                                            .color(egui::Color32::from_rgb(0x4c, 0xaf, 0x50)),
+                                    )
+                                    .on_hover_text(
+                                        "Held the test value — likely the real value (or a \
+                                         stale copy). Not proof.",
+                                    );
+                                }
+                                Some(ProbeOutcome::Reverted) => {
+                                    ui.label(egui::RichText::new("✗ reverted").small().weak())
+                                        .on_hover_text(
+                                            "The game overwrote the test value — a live copy, \
+                                             probably not the source.",
+                                        );
+                                }
+                                None => {}
                             }
                         });
                     });
@@ -1873,6 +2178,15 @@ impl eframe::App for CheatuApp {
                                     ui.monospace(human_bytes(p.rss_bytes));
                                 });
                                 row.col(|ui| {
+                                    if !p.accessible {
+                                        ui.label(
+                                            egui::RichText::new("🔒").color(warn_color(ui)),
+                                        )
+                                        .on_hover_text(
+                                            "Needs elevated access to scan (attach will \
+                                             prompt to elevate)",
+                                        );
+                                    }
                                     let mut text = egui::RichText::new(&p.name).strong();
                                     if p.is_wine {
                                         text = text.color(wine_color(ui));
@@ -1981,6 +2295,13 @@ impl eframe::App for CheatuApp {
                     ui.selectable_value(&mut theme, Theme::Dark, "Dark");
                     ui.selectable_value(&mut theme, Theme::Light, "Light");
                 });
+                ui.separator();
+                ui.checkbox(&mut self.enable_probe, "Enable probe (advanced)")
+                    .on_hover_text(
+                        "Adds a 🧪 button to results rows. It writes a test value into \
+                         the game to tell the real value from copies — this can glitch \
+                         or crash the target. Off by default.",
+                    );
             });
         if theme != self.theme {
             self.theme = theme;
@@ -2007,8 +2328,13 @@ impl eframe::App for CheatuApp {
         if do_elevate {
             if privilege::pkexec_available() {
                 self.status = "Requesting elevation via pkexec…".into();
+                // Carry the target pid so the elevated instance re-attaches.
+                let extra: Vec<String> = match elevate_for {
+                    Some(pid) => vec![privilege::ATTACH_FLAG.to_string(), pid.to_string()],
+                    None => Vec::new(),
+                };
                 // On success this replaces the process; only returns on failure.
-                let err = privilege::relaunch_elevated();
+                let err = privilege::relaunch_elevated(&extra);
                 self.status = format!("Could not elevate: {err}");
             } else {
                 self.status = "pkexec not found; install polkit or run via sudo.".into();
@@ -2022,6 +2348,9 @@ impl eframe::App for CheatuApp {
         }
         if do_reset {
             self.reset_scan();
+        }
+        if do_undo {
+            self.undo_scan();
         }
         for (addr, ty) in add_to_table {
             // Avoid duplicates (same address + type).
@@ -2046,6 +2375,23 @@ impl eframe::App for CheatuApp {
         for i in remove_from_table.into_iter().rev() {
             if i < self.saved.len() {
                 self.saved.remove(i);
+            }
+        }
+
+        // Auto-probe a candidate in the background (opens its own Mem handle, like
+        // the freeze thread, so it doesn't need the Scanner). One at a time.
+        if let (Some((addr, size)), None) = (do_probe, &self.probing) {
+            if let Some((pid, _)) = self.attached {
+                let (tx, rx) = mpsc::channel();
+                self.probe_pending = Some(rx);
+                self.probing = Some(addr);
+                self.status = format!("Probing 0x{addr:012x}…");
+                std::thread::spawn(move || {
+                    let outcome = Mem::open(pid)
+                        .ok()
+                        .and_then(|mem| probe_address(&mem, addr, size, PROBE_WAIT).ok());
+                    let _ = tx.send((addr, outcome));
+                });
             }
         }
 

@@ -30,6 +30,47 @@ impl MemoryRegion {
         }
         !matches!(self.path.as_str(), "[vvar]" | "[vdso]" | "[vsyscall]")
     }
+
+    /// Classify the region for the "real value" hint. Real game state usually
+    /// lives on the heap or in a module's writable data/bss; the stack holds
+    /// transient locals and copies.
+    pub fn kind(&self) -> RegionKind {
+        match self.path.as_str() {
+            "[heap]" => RegionKind::Heap,
+            "[stack]" => RegionKind::Stack,
+            "" => RegionKind::Anonymous,
+            // A backed pathname (a library / executable). Its writable,
+            // non-executable segment is the module's data/bss — where globals
+            // and singletons like player stats live. Other `[...]` pseudo-names
+            // (e.g. `[stack:tid]`, mapped files' text) fall through to Other.
+            p if !p.starts_with('[') && self.write && !self.exec => RegionKind::ModuleData,
+            _ => RegionKind::Other,
+        }
+    }
+}
+
+/// Coarse classification of a memory region, used to rank scan candidates by
+/// how likely they are to be the authoritative game value (see
+/// `scan::address_hint`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RegionKind {
+    Heap,
+    Stack,
+    ModuleData,
+    Anonymous,
+    Other,
+}
+
+/// Find the region containing `addr`, if any.
+///
+// ponytail: linear scan. `/proc/pid/maps` is address-sorted so a binary search
+// is possible, but the hint only runs on a narrowed candidate set (<= a couple
+// hundred rows) against a few hundred regions — linear is plenty. Switch to
+// binary if it ever shows up in a profile.
+pub fn region_for(regions: &[MemoryRegion], addr: u64) -> Option<&MemoryRegion> {
+    regions
+        .iter()
+        .find(|r| addr >= r.start && addr < r.end)
 }
 
 /// Read and parse the memory map of `pid`.

@@ -15,6 +15,9 @@ pub enum ScanType {
     U64,
     F32,
     F64,
+    /// A raw byte match of a given length — the result of an Array-of-Bytes
+    /// or String search. Not user-selectable directly (see `FirstScan::Pattern`).
+    Bytes(usize),
 }
 
 impl Default for ScanType {
@@ -46,6 +49,7 @@ impl ScanType {
             ScanType::I16 | ScanType::U16 => 2,
             ScanType::I32 | ScanType::U32 | ScanType::F32 => 4,
             ScanType::I64 | ScanType::U64 | ScanType::F64 => 8,
+            ScanType::Bytes(n) => n,
         }
     }
 
@@ -62,6 +66,76 @@ impl ScanType {
             ScanType::U64 => "u64",
             ScanType::F32 => "f32",
             ScanType::F64 => "f64",
+            ScanType::Bytes(_) => "bytes",
+        }
+    }
+
+    /// One representative type per byte-width group, for UI display — pick
+    /// the actual signedness with [`ScanType::with_sign`].
+    pub const SIZE_GROUPS: [ScanType; 6] = [
+        ScanType::I8,
+        ScanType::I16,
+        ScanType::I32,
+        ScanType::I64,
+        ScanType::F32,
+        ScanType::F64,
+    ];
+
+    pub fn is_float(self) -> bool {
+        matches!(self, ScanType::F32 | ScanType::F64)
+    }
+
+    pub fn is_signed(self) -> bool {
+        matches!(self, ScanType::I8 | ScanType::I16 | ScanType::I32 | ScanType::I64)
+    }
+
+    /// The signed or unsigned variant at this same byte width. A no-op for
+    /// floats and byte patterns, which have no sign.
+    pub fn with_sign(self, signed: bool) -> ScanType {
+        match self {
+            ScanType::I8 | ScanType::U8 => {
+                if signed {
+                    ScanType::I8
+                } else {
+                    ScanType::U8
+                }
+            }
+            ScanType::I16 | ScanType::U16 => {
+                if signed {
+                    ScanType::I16
+                } else {
+                    ScanType::U16
+                }
+            }
+            ScanType::I32 | ScanType::U32 => {
+                if signed {
+                    ScanType::I32
+                } else {
+                    ScanType::U32
+                }
+            }
+            ScanType::I64 | ScanType::U64 => {
+                if signed {
+                    ScanType::I64
+                } else {
+                    ScanType::U64
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Beginner-friendly name for the value-type picker, e.g. `"4 Bytes"`,
+    /// matching Cheat Engine's terminology instead of Rust type names.
+    pub fn friendly_label(self) -> String {
+        match self {
+            ScanType::I8 | ScanType::U8 => "Byte".to_string(),
+            ScanType::I16 | ScanType::U16 => "2 Bytes".to_string(),
+            ScanType::I32 | ScanType::U32 => "4 Bytes".to_string(),
+            ScanType::I64 | ScanType::U64 => "8 Bytes".to_string(),
+            ScanType::F32 => "Float".to_string(),
+            ScanType::F64 => "Double".to_string(),
+            ScanType::Bytes(n) => format!("Array of Bytes ({n})"),
         }
     }
 
@@ -96,8 +170,17 @@ impl ScanType {
             ScanType::U64 => ScanValue::U64(s.parse().ok()?),
             ScanType::F32 => ScanValue::F32(s.parse().ok()?),
             ScanType::F64 => ScanValue::F64(s.parse().ok()?),
+            // Space-separated hex ("48 65 6C 6C 6F") if it parses as such,
+            // otherwise the literal text as UTF-8 bytes.
+            ScanType::Bytes(_) => ScanValue::Bytes(parse_hex_bytes(s).unwrap_or_else(|| s.as_bytes().to_vec())),
         })
     }
+}
+
+/// Strict space-separated hex byte parse, e.g. `"48 65 6C"` -> `[0x48, 0x65, 0x6C]`.
+fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let bytes: Option<Vec<u8>> = s.split_whitespace().map(|t| u8::from_str_radix(t, 16).ok()).collect();
+    bytes.filter(|b| !b.is_empty())
 }
 
 impl fmt::Display for ScanType {
@@ -107,7 +190,7 @@ impl fmt::Display for ScanType {
 }
 
 /// A concrete value read from (or to be written to) memory.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub enum ScanValue {
     I8(i8),
     U8(u8),
@@ -119,6 +202,8 @@ pub enum ScanValue {
     U64(u64),
     F32(f32),
     F64(f64),
+    /// A raw byte match (Array-of-Bytes / String result).
+    Bytes(Vec<u8>),
 }
 
 impl ScanValue {
@@ -134,6 +219,7 @@ impl ScanValue {
             ScanValue::U64(_) => ScanType::U64,
             ScanValue::F32(_) => ScanType::F32,
             ScanValue::F64(_) => ScanType::F64,
+            ScanValue::Bytes(v) => ScanType::Bytes(v.len()),
         }
     }
 
@@ -157,6 +243,7 @@ impl ScanValue {
             ScanType::U64 => ScanValue::U64(u64::from_ne_bytes(b.try_into().ok()?)),
             ScanType::F32 => ScanValue::F32(f32::from_ne_bytes(b.try_into().ok()?)),
             ScanType::F64 => ScanValue::F64(f64::from_ne_bytes(b.try_into().ok()?)),
+            ScanType::Bytes(_) => ScanValue::Bytes(b.to_vec()),
         })
     }
 
@@ -173,6 +260,7 @@ impl ScanValue {
             ScanValue::U64(v) => v.to_ne_bytes().to_vec(),
             ScanValue::F32(v) => v.to_ne_bytes().to_vec(),
             ScanValue::F64(v) => v.to_ne_bytes().to_vec(),
+            ScanValue::Bytes(v) => v.clone(),
         }
     }
 
@@ -189,6 +277,9 @@ impl ScanValue {
             ScanValue::U64(v) => *v as f64,
             ScanValue::F32(v) => *v as f64,
             ScanValue::F64(v) => *v,
+            // No meaningful ordering — this makes Gt/Lt/Increased/Decreased
+            // naturally match nothing rather than compare byte content.
+            ScanValue::Bytes(_) => f64::NAN,
         }
     }
 
@@ -205,15 +296,18 @@ impl ScanValue {
             ScanValue::U64(v) => *v as i128,
             ScanValue::F32(v) => *v as i128,
             ScanValue::F64(v) => *v as i128,
+            ScanValue::Bytes(_) => 0, // unreachable: approx_eq handles Bytes separately
         }
     }
 
     /// Equality suitable for "exact"/"unchanged"/"changed" comparisons.
     ///
     /// Integers compare exactly; floats compare with a small tolerance so that
-    /// e.g. a displayed `100` matches an in-memory `99.99998`.
+    /// e.g. a displayed `100` matches an in-memory `99.99998`; byte matches
+    /// compare exactly.
     pub fn approx_eq(&self, other: &ScanValue) -> bool {
         match (self, other) {
+            (ScanValue::Bytes(a), ScanValue::Bytes(b)) => a == b,
             (ScanValue::F32(_), _) | (ScanValue::F64(_), _) => {
                 let (a, b) = (self.as_f64(), other.as_f64());
                 (a - b).abs() <= 1e-4_f64.max(b.abs() * 1e-6)
@@ -236,6 +330,16 @@ impl fmt::Display for ScanValue {
             ScanValue::U64(v) => write!(f, "{v}"),
             ScanValue::F32(v) => write!(f, "{v}"),
             ScanValue::F64(v) => write!(f, "{v}"),
+            // Show matched text when it's valid UTF-8 (the common case for a
+            // String search), otherwise fall back to hex for raw AoB matches.
+            ScanValue::Bytes(v) => match std::str::from_utf8(v) {
+                Ok(s) if !s.contains('\0') => write!(f, "{s}"),
+                _ => write!(
+                    f,
+                    "{}",
+                    v.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+                ),
+            },
         }
     }
 }
