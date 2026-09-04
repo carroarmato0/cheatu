@@ -156,6 +156,10 @@ snap: ## Build the snap (needs snapcraft)
 aur-srcinfo: ## Regenerate packaging/aur/.SRCINFO (needs makepkg)
 	cd packaging/aur && makepkg --printsrcinfo > .SRCINFO
 
+.PHONY: check-release
+check-release: ## Verify versions, .SRCINFO and PKGBUILD deps before tagging
+	./packaging/check-release.sh
+
 # ---------------------------------------------------------------------------
 
 .PHONY: help

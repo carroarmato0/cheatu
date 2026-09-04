@@ -43,3 +43,38 @@ jobs:
 
       - name: Build (release)
         run: cargo build --workspace --release --locked
+
+      - name: Upload the GUI binary for the packaging check
+        uses: actions/upload-artifact@v4
+        with:
+          name: cheatu-gui
+          path: target/release/cheatu-gui
+          retention-days: 1
+
+  # The AUR PKGBUILD can only be checked with Arch's own tools, and its
+  # dependency list can only be checked against a built binary — the GUI
+  # dlopens its windowing stack, so nothing links to it.
+  packaging:
+    name: AUR PKGBUILD
+    needs: test
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install checking tools
+        run: pacman -Sy --noconfirm --needed namcap libglvnd libx11 libxcb
+             libxcursor libxi libxkbcommon libxkbcommon-x11 libxrender wayland
+             fontconfig polkit
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cheatu-gui
+          path: target/release
+
+      - name: Check the release metadata
+        run: |
+          # makepkg refuses to run as root, and the container has no other user.
+          useradd -m build
+          chown -R build .
+          su build -c ./packaging/check-release.sh

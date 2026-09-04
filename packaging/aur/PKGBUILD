@@ -2,11 +2,16 @@
 pkgname=cheatu
 pkgver=1.1.0
 pkgrel=1
-pkgdesc="Memory scanner and cheat tool for Linux (CLI + GUI), inspired by Cheat Engine and scanmem"
+pkgdesc="Memory scanner and cheat tool for games, inspired by Cheat Engine and scanmem"
 arch=('x86_64')
 url="https://github.com/carroarmato0/cheatu"
 license=('MIT')
-depends=('gcc-libs' 'polkit' 'fontconfig')
+depends=('gcc-libs' 'glibc'
+         # dlopened by the GUI's windowing stack, so `ldd` shows none of them
+         'fontconfig' 'libglvnd' 'libx11' 'libxcb' 'libxcursor' 'libxi'
+         'libxkbcommon' 'libxkbcommon-x11' 'libxrender' 'wayland'
+         # pkexec, for attaching to a process the user does not own
+         'polkit')
 optdepends=('noto-fonts-cjk: CJK text rendering in the GUI')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
