@@ -23,7 +23,7 @@ pub use maps::{read_maps, region_for, MemoryRegion, RegionKind};
 pub use mem::{probe_address, Mem, ProbeOutcome};
 pub use process::{human_bytes, list_processes, resume, suspend, ProcInfo};
 pub use scan::{
-    address_hint, parse_aob, parse_range, AddrHint, Confidence, FirstScan, NextScan, Scanner,
-    ANY_TYPES,
+    address_hint, parse_aob, parse_range, AddrHint, Confidence, FirstScan, NextScan, ScanProgress,
+    Scanner, ANY_TYPES,
 };
 pub use value::{ScanType, ScanValue};

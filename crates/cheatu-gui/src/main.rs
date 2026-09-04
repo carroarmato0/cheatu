@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use cheatu_core::process::ProcInfo;
 use cheatu_core::scan::{
-    address_hint, AddrHint, Confidence, FirstScan, NextScan, Scanner, ANY_TYPES,
+    address_hint, AddrHint, Confidence, FirstScan, NextScan, ScanProgress, Scanner, ANY_TYPES,
 };
 use cheatu_core::{
     human_bytes, list_processes, privilege, probe_address, read_maps, region_for, Mem,
@@ -1259,6 +1259,8 @@ struct CheatuApp {
     // Background scan.
     pending: Option<Receiver<ScanOutcome>>,
     scanning: bool,
+    /// Progress and cancellation for the scan on the worker thread.
+    scan_progress: Option<Arc<ScanProgress>>,
     status: String,
 
     // Background probe (active "which one sticks" disambiguation).
@@ -1442,6 +1444,9 @@ impl CheatuApp {
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.scanning = true;
+        // Taken before the scanner moves onto the worker thread — it's the only
+        // way back in while the scan runs.
+        self.scan_progress = Some(scanner.progress());
         self.status = "Scanning…".into();
         let pause = self.pause_while_scanning;
 
@@ -1462,6 +1467,9 @@ impl CheatuApp {
             }
             let message = match res {
                 Ok(()) => format!("{} results.", scanner.count()),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    format!("Scan cancelled — {} results kept.", scanner.count())
+                }
                 Err(e) => format!("Scan error: {e}"),
             };
             let _ = tx.send(ScanOutcome { scanner, message });
@@ -1533,6 +1541,7 @@ impl CheatuApp {
             self.scanner = Some(outcome.scanner);
             self.scanning = false;
             self.pending = None;
+            self.scan_progress = None;
             self.rebuild_display();
         }
     }
@@ -1716,6 +1725,24 @@ impl eframe::App for CheatuApp {
                     ui.spinner();
                 }
                 ui.label(&self.status);
+                // A first scan over a multi-gigabyte process takes long enough
+                // that a spinner with no way out is its own bug.
+                if let (true, Some(p)) = (self.scanning, &self.scan_progress) {
+                    if let Some(f) = p.fraction() {
+                        ui.add(
+                            egui::ProgressBar::new(f)
+                                .desired_width(120.0)
+                                .show_percentage(),
+                        );
+                    }
+                    if ui
+                        .button("Cancel")
+                        .on_hover_text("Stop the scan and keep the results you had")
+                        .clicked()
+                    {
+                        p.cancel();
+                    }
+                }
             });
         });
 
@@ -2539,7 +2566,7 @@ impl eframe::App for CheatuApp {
         }
 
         // Keep current values (scanner results, or the RPG Maker snapshot) live.
-        if self.scanner.is_some() || self.mode == AppMode::RpgMaker {
+        if self.scanner.is_some() || self.scanning || self.mode == AppMode::RpgMaker {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
     }

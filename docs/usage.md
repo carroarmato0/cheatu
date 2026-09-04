@@ -80,6 +80,8 @@ The header has two modes: **Memory scanner** (the default) and
    and click **Next scan** — or press Enter again — to narrow the list.
    *increased / decreased / changed / unchanged* compare against the last scan
    and ignore the value box.
+   A running scan shows its progress in the status bar with a **Cancel**
+   button; cancelling leaves the results you already had untouched.
 4. Click **+** on a result to add it to the **Cheat table** on the right.
 5. In the cheat table, edit the value and **Set** it to write it once, or tick
    **Freeze** to keep rewriting it continuously. Each row shows the address's

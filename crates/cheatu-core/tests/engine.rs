@@ -392,3 +392,54 @@ fn region_for_finds_containing_region() {
     assert!(region_for(&regions, 0x2000).is_none());
     assert!(region_for(&regions, 0x9999).is_none());
 }
+
+#[test]
+fn cancelling_a_scan_leaves_the_candidate_set_alone() {
+    let marker = Box::new(0x5EED_1234u32);
+    let mut sc = Scanner::new(own_pid()).unwrap();
+    sc.first_scan(FirstScan::Value {
+        value: marker.to_string(),
+        types: vec![ScanType::U32],
+    })
+    .unwrap();
+    let before = sc.count();
+    assert!(before > 0, "the marker itself should have been found");
+    assert_eq!(
+        sc.progress().fraction(),
+        Some(1.0),
+        "a finished scan should report itself finished"
+    );
+
+    // Cancelling before the scan starts is the deterministic form of cancelling
+    // during one: every worker checks the flag before its first block.
+    sc.progress().cancel();
+    let err = sc.next_scan(NextScan::Changed, None).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    assert_eq!(
+        sc.count(),
+        before,
+        "a cancelled narrowing must not keep a partial result set"
+    );
+
+    // The cancel is consumed, not sticky — the next scan runs normally. Its
+    // count is not asserted: other copies of the marker live in this process
+    // and are free to change between the two scans.
+    sc.next_scan(NextScan::Unchanged, None).unwrap();
+
+    black_box(&marker);
+}
+
+#[test]
+fn a_cancelled_first_scan_reports_no_session() {
+    let mut sc = Scanner::new(own_pid()).unwrap();
+    sc.progress().cancel();
+    let err = sc
+        .first_scan(FirstScan::Value {
+            value: "1234".into(),
+            types: vec![ScanType::I32],
+        })
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    assert!(!sc.has_scanned(), "a cancelled first scan started nothing");
+    assert_eq!(sc.count(), 0);
+}

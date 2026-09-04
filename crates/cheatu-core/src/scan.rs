@@ -6,7 +6,8 @@
 //! whether the game stores it as an i32, an f32, an i64, and so on.
 
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::maps::{read_maps, MemoryRegion, RegionKind};
 use crate::mem::Mem;
@@ -213,6 +214,67 @@ impl NextScan {
 /// limit. ponytail: bump if users want deeper undo and memory allows.
 const UNDO_DEPTH: usize = 16;
 
+/// How many candidates one worker checks between cancellation checks during a
+/// next scan. An atomic per candidate would cost more than the comparison it
+/// guards; a block is still fast enough to feel instant.
+const PROGRESS_BLOCK: usize = 4096;
+
+/// Cancellation and progress for a running scan, shared with whoever started
+/// it.
+///
+/// A first scan over a multi-gigabyte process runs long enough that a spinner
+/// with no way out is its own bug. The scan runs on a worker thread owning the
+/// [`Scanner`]; the UI keeps one of these (see [`Scanner::progress`]) and can
+/// watch it or call [`ScanProgress::cancel`].
+#[derive(Default)]
+pub struct ScanProgress {
+    cancel: AtomicBool,
+    done: AtomicUsize,
+    total: AtomicUsize,
+}
+
+impl ScanProgress {
+    /// Ask the running scan to stop. It returns [`io::ErrorKind::Interrupted`]
+    /// and leaves the candidate set exactly as it was.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// How much of the scan is done, in `0.0..=1.0`. `None` when no scan has
+    /// sized itself yet — a scan of nothing has no meaningful fraction.
+    pub fn fraction(&self) -> Option<f32> {
+        let total = self.total.load(Ordering::Relaxed);
+        (total > 0).then(|| self.done.load(Ordering::Relaxed).min(total) as f32 / total as f32)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Read the cancel flag and clear it, so a cancelled scan doesn't also kill
+    /// the next one.
+    fn take_cancel(&self) -> bool {
+        self.cancel.swap(false, Ordering::Relaxed)
+    }
+
+    /// Start a run of `total` work units. The cancel flag is deliberately left
+    /// alone: a cancel that arrives just before the scan starts should still
+    /// stop it.
+    fn begin(&self, total: usize) {
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+    }
+
+    fn advance(&self, n: usize) {
+        self.done.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
+/// The error a scan returns once [`ScanProgress::cancel`] has been called.
+fn cancelled_err() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "scan cancelled")
+}
+
 /// Holds an open memory handle plus the current candidate set for one process.
 pub struct Scanner {
     mem: Mem,
@@ -221,6 +283,7 @@ pub struct Scanner {
     /// Snapshots of `results` taken before each narrowing/clear, newest last,
     /// so the most recent scans can be undone.
     history: Vec<Vec<Candidate>>,
+    progress: Arc<ScanProgress>,
 }
 
 impl Scanner {
@@ -231,6 +294,7 @@ impl Scanner {
             results: Vec::new(),
             scanned: false,
             history: Vec::new(),
+            progress: Arc::default(),
         })
     }
 
@@ -246,11 +310,20 @@ impl Scanner {
             results: candidates,
             scanned: true,
             history: Vec::new(),
+            progress: Arc::default(),
         })
     }
 
     pub fn pid(&self) -> i32 {
         self.mem.pid()
+    }
+
+    /// A handle on the running scan, for progress display and cancellation.
+    ///
+    /// Take this *before* moving the scanner onto a worker thread; it stays
+    /// valid for every scan this scanner runs.
+    pub fn progress(&self) -> Arc<ScanProgress> {
+        Arc::clone(&self.progress)
     }
 
     /// Whether a first scan has been performed yet.
@@ -315,6 +388,7 @@ impl Scanner {
         let scannable: Vec<MemoryRegion> =
             regions.into_iter().filter(|r| r.is_scannable()).collect();
         let items = work_items(&scannable);
+        self.progress.begin(items.len());
 
         let budget = Budget::new(candidate_cap());
 
@@ -398,6 +472,7 @@ impl Scanner {
     {
         let next = AtomicUsize::new(0);
         let mem = &self.mem;
+        let progress = &self.progress;
         let scan_one = &scan_one;
         let threads = worker_count().min(items.len().max(1));
 
@@ -409,11 +484,12 @@ impl Scanner {
                         let mut local = Vec::new();
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
-                            if i >= items.len() || budget.spent() {
+                            if i >= items.len() || budget.spent() || progress.cancelled() {
                                 break;
                             }
                             let (start, end) = items[i];
                             scan_one(mem, start, end, &mut buf, &mut local);
+                            progress.advance(1);
                         }
                         local
                     })
@@ -426,6 +502,11 @@ impl Scanner {
                 .collect()
         });
 
+        // Cancellation first: a scan the user stopped should say so, not report
+        // the budget it happened to be near.
+        if self.progress.take_cancel() {
+            return Err(cancelled_err());
+        }
         if budget.spent() {
             return Err(too_many(budget.charged() as u64, budget.cap));
         }
@@ -451,6 +532,8 @@ impl Scanner {
         let operand_f = operand.and_then(|s| s.trim().parse::<f64>().ok());
         let mem = &self.mem;
         let cands = &self.results;
+        let progress = &self.progress;
+        progress.begin(cands.len());
 
         let threads = worker_count().min(cands.len());
         let chunk = cands.len().div_ceil(threads);
@@ -462,32 +545,44 @@ impl Scanner {
                     s.spawn(move || {
                         let mut buf = [0u8; 8];
                         let mut local = Vec::new();
-                        for cand in group {
-                            let ty = cand.ty();
-                            let size = ty.size();
-                            let cur = match mem.read_at(cand.addr, &mut buf[..size]) {
-                                Ok(n) if n == size => ScanValue::from_ne_bytes(ty, &buf[..size])
-                                    .expect("slice is exactly one value wide"),
-                                _ => continue, // unreadable now -> drop
-                            };
-
-                            let keep = match cmp {
-                                NextScan::Eq => operand.is_some_and(|s| eq_operand(&cur, ty, s)),
-                                NextScan::Ne => !operand.is_some_and(|s| eq_operand(&cur, ty, s)),
-                                NextScan::Gt => operand_f.is_some_and(|t| cur.as_f64() > t),
-                                NextScan::Lt => operand_f.is_some_and(|t| cur.as_f64() < t),
-                                NextScan::Increased => cur.as_f64() > cand.prev.as_f64(),
-                                NextScan::Decreased => cur.as_f64() < cand.prev.as_f64(),
-                                NextScan::Changed => !cur.approx_eq(&cand.prev),
-                                NextScan::Unchanged => cur.approx_eq(&cand.prev),
-                            };
-
-                            if keep {
-                                local.push(Candidate {
-                                    addr: cand.addr,
-                                    prev: cur,
-                                });
+                        for block in group.chunks(PROGRESS_BLOCK) {
+                            if progress.cancelled() {
+                                break;
                             }
+                            for cand in block {
+                                let ty = cand.ty();
+                                let size = ty.size();
+                                let cur = match mem.read_at(cand.addr, &mut buf[..size]) {
+                                    Ok(n) if n == size => {
+                                        ScanValue::from_ne_bytes(ty, &buf[..size])
+                                            .expect("slice is exactly one value wide")
+                                    }
+                                    _ => continue, // unreadable now -> drop
+                                };
+
+                                let keep = match cmp {
+                                    NextScan::Eq => {
+                                        operand.is_some_and(|s| eq_operand(&cur, ty, s))
+                                    }
+                                    NextScan::Ne => {
+                                        !operand.is_some_and(|s| eq_operand(&cur, ty, s))
+                                    }
+                                    NextScan::Gt => operand_f.is_some_and(|t| cur.as_f64() > t),
+                                    NextScan::Lt => operand_f.is_some_and(|t| cur.as_f64() < t),
+                                    NextScan::Increased => cur.as_f64() > cand.prev.as_f64(),
+                                    NextScan::Decreased => cur.as_f64() < cand.prev.as_f64(),
+                                    NextScan::Changed => !cur.approx_eq(&cand.prev),
+                                    NextScan::Unchanged => cur.approx_eq(&cand.prev),
+                                };
+
+                                if keep {
+                                    local.push(Candidate {
+                                        addr: cand.addr,
+                                        prev: cur,
+                                    });
+                                }
+                            }
+                            progress.advance(block.len());
                         }
                         local
                     })
@@ -501,6 +596,12 @@ impl Scanner {
             }
             all
         });
+
+        // A cancelled narrowing kept only part of the set, so throw it away —
+        // the candidate list is left exactly as it was.
+        if self.progress.take_cancel() {
+            return Err(cancelled_err());
+        }
 
         // Move the pre-scan set into history (no clone) so this narrowing can
         // be undone, e.g. after an accidental "Decreased" that matched nothing.
