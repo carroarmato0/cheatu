@@ -90,7 +90,9 @@ The header has two modes: **Memory scanner** (the default) and
    (likely the real one). Turn it on under **⚙ Settings → Enable probe** — it
    writes to live game memory. **🧪 Probe N** above the results tests up to 32
    visible addresses in one pass, one at a time, after asking you to confirm;
-   frozen rows are skipped, since a frozen value is being rewritten anyway.
+   frozen rows are skipped, since a frozen value is being rewritten anyway. The
+   status bar shows how far it has got, with a **Cancel** button — it stops
+   after the address being probed right then, so nothing is left perturbed.
 5. Click **+** on a result to add it to the **Cheat table** on the right.
 6. In the cheat table, edit the value and **Set** it to write it once, or tick
    **Freeze** to keep rewriting it continuously. Each row shows the address's

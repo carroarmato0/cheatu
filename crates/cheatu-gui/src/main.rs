@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1303,8 +1304,10 @@ struct CheatuApp {
     probe_pending: Option<Receiver<(u64, Option<ProbeOutcome>)>>,
     /// Addresses in the batch being probed, oldest first. Empty when idle.
     probe_batch: Vec<u64>,
-    /// How many of `probe_batch` are still in flight (disables further probes).
-    probe_remaining: usize,
+    /// How many of `probe_batch` have reported back.
+    probe_done: usize,
+    /// Set to stop the batch after the address being probed right now.
+    probe_cancel: Arc<AtomicBool>,
     /// Waiting for the user to confirm a batch probe.
     show_probe_confirm: bool,
     /// Latest probe outcome per address, shown as an icon in the results row.
@@ -1603,15 +1606,24 @@ impl CheatuApp {
 
     fn poll_probe(&mut self) {
         // Drain everything that arrived: a batch reports one address at a time
-        // and a frame may cover several.
+        // and a frame may cover several. The worker dropping its sender is what
+        // marks the batch over — whether it finished the list or was cancelled.
         let mut results = Vec::new();
+        let mut finished = false;
         if let Some(rx) = &self.probe_pending {
-            while let Ok(msg) = rx.try_recv() {
-                results.push(msg);
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => results.push(msg),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                }
             }
         }
         for (addr, outcome) in results {
-            self.probe_remaining = self.probe_remaining.saturating_sub(1);
+            self.probe_done += 1;
             match outcome {
                 Some(o) => {
                     self.probe_results.insert(addr, o);
@@ -1633,18 +1645,31 @@ impl CheatuApp {
                 // ruled in or out; the summary reports it as untested.
                 None => {}
             }
-            if self.probe_remaining > 0 {
-                self.status = format!("Probing… {} left.", self.probe_remaining);
+            if self.probe_done < self.probe_batch.len() {
+                self.status = format!(
+                    "Probing… {} of {}.",
+                    self.probe_done + 1,
+                    self.probe_batch.len()
+                );
             }
         }
-        if self.probe_remaining == 0 && self.probe_pending.is_some() {
+        if finished {
             if self.probe_batch.len() > 1 {
                 let held = self.batch_count(ProbeOutcome::Held);
                 let reverted = self.batch_count(ProbeOutcome::Reverted);
-                let untested = self.probe_batch.len() - held - reverted;
+                let untested = self.probe_done - held - reverted;
+                let stopped = if self.probe_done < self.probe_batch.len() {
+                    format!(
+                        " — cancelled, {} of {} untested",
+                        self.probe_batch.len() - self.probe_done,
+                        self.probe_batch.len()
+                    )
+                } else {
+                    String::new()
+                };
                 self.status = format!(
-                    "Probed {}: {held} held, {reverted} reverted{}.",
-                    self.probe_batch.len(),
+                    "Probed {}: {held} held, {reverted} reverted{}{stopped}.",
+                    self.probe_done,
                     if untested > 0 {
                         format!(", {untested} not writable")
                     } else {
@@ -1661,18 +1686,25 @@ impl CheatuApp {
     /// rewritten every [`FREEZE_INTERVAL`], so it would read as "reverted"
     /// whatever the game does.
     fn probe_all_targets(&self) -> Vec<(u64, usize)> {
+        // An "Any" scan can list one address once per type; probing it twice
+        // would cost another PROBE_WAIT to learn the same thing.
+        let mut seen = std::collections::HashSet::new();
         self.display
             .iter()
             .filter(|d| !self.saved.iter().any(|e| e.frozen && e.addr == d.addr))
+            .filter(|d| seen.insert(d.addr))
             .take(PROBE_BATCH_MAX)
             .map(|d| (d.addr, d.prev.ty().size()))
             .collect()
     }
 
-    /// How many of the last batch ended with `want`.
+    /// How many of the last batch ended with `want`. Only the addresses the
+    /// worker reached count — the rest may still hold an outcome from an
+    /// earlier batch.
     fn batch_count(&self, want: ProbeOutcome) -> usize {
         self.probe_batch
             .iter()
+            .take(self.probe_done)
             .filter(|a| self.probe_results.get(a) == Some(&want))
             .count()
     }
@@ -1851,6 +1883,27 @@ impl eframe::App for CheatuApp {
                         .clicked()
                     {
                         p.cancel();
+                    }
+                }
+                // Same for a batch probe: up to PROBE_BATCH_MAX × PROBE_WAIT is
+                // long enough to want out of.
+                if self.probe_pending.is_some() && !self.probe_batch.is_empty() {
+                    ui.spinner();
+                    ui.add(
+                        egui::ProgressBar::new(
+                            self.probe_done as f32 / self.probe_batch.len() as f32,
+                        )
+                        .desired_width(120.0)
+                        .show_percentage(),
+                    );
+                    if ui
+                        .button("Cancel")
+                        .on_hover_text(
+                            "Stop after the address being probed now — it is restored first",
+                        )
+                        .clicked()
+                    {
+                        self.probe_cancel.store(true, Ordering::Relaxed);
                     }
                 }
             });
@@ -2180,7 +2233,7 @@ impl eframe::App for CheatuApp {
                     let n = self.display.len().min(PROBE_BATCH_MAX);
                     if ui
                         .add_enabled(
-                            n > 0 && !self.scanning && self.probe_remaining == 0,
+                            n > 0 && !self.scanning && self.probe_pending.is_none(),
                             egui::Button::new(format!("🧪 Probe {n}")).small(),
                         )
                         .on_hover_text(
@@ -2215,7 +2268,7 @@ impl eframe::App for CheatuApp {
             let show_hints = self.show_hints;
             // Auto-probe state, hoisted so the row closure needn't borrow &mut self.
             let enable_probe = self.enable_probe;
-            let probe_busy = self.scanning || self.probe_remaining > 0;
+            let probe_busy = self.scanning || self.probe_pending.is_some();
             let probe_results = &self.probe_results;
             let saved = &self.saved;
             let res_sort = self.res_sort;
@@ -2772,21 +2825,28 @@ impl eframe::App for CheatuApp {
 
         // Auto-probe a candidate in the background (opens its own Mem handle, like
         // the freeze thread, so it doesn't need the Scanner). One at a time.
-        if !do_probe.is_empty() && self.probe_remaining == 0 {
+        if !do_probe.is_empty() && self.probe_pending.is_none() {
             if let Some((pid, _)) = self.attached {
                 let (tx, rx) = mpsc::channel();
                 self.probe_pending = Some(rx);
                 self.probe_batch = do_probe.iter().map(|(addr, _)| *addr).collect();
-                self.probe_remaining = do_probe.len();
+                self.probe_done = 0;
+                self.probe_cancel.store(false, Ordering::Relaxed);
                 self.status = match do_probe.as_slice() {
                     [(addr, _)] => format!("Probing 0x{addr:012x}…"),
                     batch => format!("Probing {} addresses…", batch.len()),
                 };
+                let cancel = Arc::clone(&self.probe_cancel);
                 std::thread::spawn(move || {
                     let mem = Mem::open(pid).ok();
                     // One at a time: only ever one perturbed value in the game,
-                    // and it is restored before the next is touched.
+                    // and it is restored before the next is touched. Cancelling
+                    // is checked between addresses, never mid-probe, so a
+                    // sentinel is always cleaned up before we stop.
                     for (addr, size) in do_probe {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let outcome = mem
                             .as_ref()
                             .and_then(|m| probe_address(m, addr, size, PROBE_WAIT).ok());
@@ -2911,6 +2971,32 @@ mod tests {
         let mut expected = labels.clone();
         expected.sort();
         assert_eq!(labels, expected);
+    }
+
+    /// A cancelled batch accounts only for what it actually tested; the worker
+    /// dropping its sender is what marks the batch over.
+    #[test]
+    fn a_cancelled_probe_batch_reports_only_what_it_tested() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = CheatuApp {
+            probe_pending: Some(rx),
+            probe_batch: vec![0x10, 0x20, 0x30, 0x40],
+            ..Default::default()
+        };
+        tx.send((0x10, Some(ProbeOutcome::Held))).unwrap();
+        tx.send((0x20, Some(ProbeOutcome::Reverted))).unwrap();
+        app.poll_probe();
+        assert_eq!(app.probe_done, 2);
+        assert!(app.probe_pending.is_some(), "the batch is still running");
+        assert!(app.status.contains("3 of 4"), "{}", app.status);
+
+        // Cancelling makes the worker stop and drop its sender.
+        drop(tx);
+        app.poll_probe();
+        assert!(app.probe_pending.is_none(), "the batch is over");
+        assert!(app.status.contains("cancelled"), "{}", app.status);
+        assert!(app.status.contains("1 held"), "{}", app.status);
+        assert!(app.status.contains("2 of 4 untested"), "{}", app.status);
     }
 
     /// "Probe all" skips frozen rows and stops at the cap, so it can't write to
