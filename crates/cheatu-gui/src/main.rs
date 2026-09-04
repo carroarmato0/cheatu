@@ -1325,6 +1325,36 @@ impl CheatuApp {
         }
     }
 
+    /// Why a scan can't run with the current inputs, for the disabled scan
+    /// buttons. Mirrors the guards in [`CheatuApp::start_scan`], which stays
+    /// the authority — this only decides whether the button is clickable.
+    fn scan_blocker(&self, first: bool) -> Option<&'static str> {
+        let Some(scanner) = &self.scanner else {
+            return Some("Attach to a process first.");
+        };
+        let text = self.value_text.trim();
+        if !first {
+            if !scanner.has_scanned() {
+                return Some("Do a first scan before narrowing.");
+            }
+            return (self.next_mode.needs_value() && text.parse::<f64>().is_err())
+                .then_some("Enter a value for this comparison.");
+        }
+        match self.type_sel {
+            TypeSel::Aob => cheatu_core::parse_aob(text)
+                .is_none()
+                .then_some("Enter a byte pattern, e.g. 48 65 ?? 6C 6F."),
+            TypeSel::Str => self
+                .value_text
+                .is_empty()
+                .then_some("Enter a string to search for."),
+            // An unknown-value scan keeps every address, so it needs no value.
+            _ if self.unknown_initial => None,
+            _ => (cheatu_core::parse_range(text).is_none() && text.parse::<f64>().is_err())
+                .then_some("Enter a value to scan for, e.g. 100 — or a range, 6400000..6500000."),
+        }
+    }
+
     fn start_scan(&mut self, first: bool) {
         let Some(mut scanner) = self.scanner.take() else {
             self.status = "Attach to a process first.".into();
@@ -1613,6 +1643,8 @@ impl eframe::App for CheatuApp {
         let mut add_to_table: Vec<(u64, ScanType)> = Vec::new();
         let mut remove_from_table: Vec<usize> = Vec::new();
         let mut clear_table = false;
+        // Index of the cheat table row whose value should be written once.
+        let mut do_set: Option<usize> = None;
         // (addr, size) of a candidate to auto-probe.
         let mut do_probe: Option<(u64, usize)> = None;
 
@@ -1688,6 +1720,9 @@ impl eframe::App for CheatuApp {
         });
 
         // ---- Cheat table (right, scanner mode only) --------------------
+        // Bound outside the panel so the rows can read live values while
+        // `self.saved` is borrowed mutably.
+        let scanner_ref = self.scanner.as_ref();
         if self.mode == AppMode::Scanner {
             egui::SidePanel::right("cheat_table")
                 .resizable(true)
@@ -1729,10 +1764,10 @@ impl eframe::App for CheatuApp {
                         .show(ui, |ui| {
                             for (i, entry) in self.saved.iter_mut().enumerate() {
                                 // One entry = one line, Cheat Engine style:
-                                //   [❄] description  0xADDR  ty  [value]  [🗑]
-                                // The live current value is deliberately omitted: it
-                                // changed constantly, shifting the row and making the
-                                // delete button hard to hit.
+                                //   [❄] description  0xADDR  ty  [value] [Set] [🗑]  = current
+                                // The live value goes last because it changes
+                                // constantly: anything after it would jump
+                                // around as its width changed.
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut entry.frozen, "").on_hover_text("Freeze");
                                     ui.add(
@@ -1750,9 +1785,32 @@ impl eframe::App for CheatuApp {
                                         egui::TextEdit::singleline(&mut entry.value_text)
                                             .desired_width(64.0),
                                     );
+                                    let valid = entry.ty.parse(&entry.value_text).is_some();
+                                    if ui
+                                        .add_enabled(
+                                            valid && !entry.frozen,
+                                            egui::Button::new("Set").small(),
+                                        )
+                                        .on_hover_text("Write this value to the address once")
+                                        .on_disabled_hover_text(if entry.frozen {
+                                            "Frozen — this value is already written continuously."
+                                        } else {
+                                            "Not a valid value for this type."
+                                        })
+                                        .clicked()
+                                    {
+                                        do_set = Some(i);
+                                    }
                                     if ui.small_button("🗑").on_hover_text("remove").clicked() {
                                         remove_from_table.push(i);
                                     }
+                                    let cur = scanner_ref
+                                        .and_then(|s| read_current(s, entry.addr, entry.ty))
+                                        .unwrap_or_else(|| "n/a".to_string());
+                                    ui.label(
+                                        egui::RichText::new(format!("= {cur}")).monospace().weak(),
+                                    )
+                                    .on_hover_text("The value in the game right now");
                                 });
                             }
                         });
@@ -1760,6 +1818,12 @@ impl eframe::App for CheatuApp {
         }
 
         // ---- Central panel: scanner controls, or RPG Maker mode --------
+        // Why a scan can't run right now, computed before the closure: asking
+        // `self` inside it would borrow the whole struct while the widgets hold
+        // `&mut self.value_text`.
+        let has_scanned = self.scanner.as_ref().is_some_and(|s| s.has_scanned());
+        let first_block = self.scan_blocker(true);
+        let next_block = self.scan_blocker(false);
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.mode == AppMode::RpgMaker {
                 self.rpg.ui(ui);
@@ -1839,18 +1903,31 @@ impl eframe::App for CheatuApp {
                             // An unknown-value first scan ignores the value —
                             // but once it has run, this field is the next-scan
                             // operand again, so only lock it until then.
-                            let needs_value = !self.unknown_initial
-                                || self.scanner.as_ref().is_some_and(|s| s.has_scanned());
-                            ui.add_enabled(
-                                needs_value,
-                                egui::TextEdit::singleline(&mut self.value_text)
-                                    .hint_text(hint)
-                                    .desired_width(200.0),
-                            )
-                            .on_disabled_hover_text(
-                                "Not used — an unknown-value scan keeps every address.",
-                            )
-                            .on_hover_text(
+                            let needs_value = !self.unknown_initial || has_scanned;
+                            let resp = ui
+                                .add_enabled(
+                                    needs_value,
+                                    egui::TextEdit::singleline(&mut self.value_text)
+                                        .hint_text(hint)
+                                        .desired_width(200.0),
+                                )
+                                .on_disabled_hover_text(
+                                    "Not used — an unknown-value scan keeps every address.",
+                                );
+                            // Enter runs the scan the buttons would. The loop is
+                            // scan, change the value in-game, scan again — a trip
+                            // to the mouse every iteration is the friction.
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                if has_scanned {
+                                    do_next = next_block.is_none();
+                                } else {
+                                    do_first = first_block.is_none();
+                                }
+                                // Enter drops focus, so take it back — otherwise
+                                // every scan after the first needs the mouse again.
+                                resp.request_focus();
+                            }
+                            resp.on_hover_text(
                                 "The value to search for. If you can only bracket it — gold is \
                                  somewhere over 6.4M — enter a range like 6400000..6500000 and \
                                  the first scan keeps everything inside it.",
@@ -1872,29 +1949,39 @@ impl eframe::App for CheatuApp {
                         ui.end_row();
 
                         ui.label("Next scan");
-                        egui::ComboBox::from_id_salt("next_mode")
-                            .selected_text(self.next_mode.label())
-                            .show_ui(ui, |ui| {
-                                for m in NextMode::ALL {
-                                    ui.selectable_value(&mut self.next_mode, m, m.label());
-                                }
-                            });
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("next_mode")
+                                .selected_text(self.next_mode.label())
+                                .show_ui(ui, |ui| {
+                                    for m in NextMode::ALL {
+                                        ui.selectable_value(&mut self.next_mode, m, m.label());
+                                    }
+                                });
+                            if !self.next_mode.needs_value() {
+                                ui.label(
+                                    egui::RichText::new("ignores the value box").weak().small(),
+                                );
+                            }
+                        });
                         ui.end_row();
                     });
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
+                    // Disabled with the reason on hover, rather than letting the
+                    // click through to a rejection in the status bar.
                     if ui
-                        .add(egui::Button::new("🔍 First scan"))
+                        .add_enabled(first_block.is_none(), egui::Button::new("🔍 First scan"))
                         .on_hover_text("Scan the whole process for this value")
+                        .on_disabled_hover_text(first_block.unwrap_or_default())
                         .clicked()
                     {
                         do_first = true;
                     }
-                    let can_next = self.scanner.as_ref().is_some_and(|s| s.has_scanned());
                     if ui
-                        .add_enabled(can_next, egui::Button::new("Next scan"))
+                        .add_enabled(next_block.is_none(), egui::Button::new("Next scan"))
                         .on_hover_text("Narrow the current results")
+                        .on_disabled_hover_text(next_block.unwrap_or_default())
                         .clicked()
                     {
                         do_next = true;
@@ -2415,6 +2502,17 @@ impl eframe::App for CheatuApp {
             self.saved.clear();
             self.status = "Cheat table cleared.".into();
         }
+        // A one-shot write. Freezing writes continuously; this is for the far
+        // more common "set it once and see what happens".
+        if let Some(entry) = do_set.and_then(|i| self.saved.get(i)) {
+            self.status = match (&self.scanner, entry.ty.parse(&entry.value_text)) {
+                (Some(scanner), Some(v)) => match scanner.write_value(entry.addr, &v) {
+                    Ok(()) => format!("Wrote {v} to 0x{:x}.", entry.addr),
+                    Err(e) => format!("Write to 0x{:x} failed: {e}", entry.addr),
+                },
+                _ => "Attach to a process first.".into(),
+            };
+        }
         // Remove in reverse so indices stay valid.
         remove_from_table.sort_unstable();
         for i in remove_from_table.into_iter().rev() {
@@ -2484,4 +2582,51 @@ fn sort_header(ui: &mut eframe::egui::Ui, text: &str, active: bool) -> eframe::e
 /// reads raw bytes and decodes with the requested width.
 fn read_current(scanner: &Scanner, addr: u64, ty: ScanType) -> Option<String> {
     scanner.read_typed(addr, ty).ok().map(|v| v.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scan buttons are enabled exactly when `start_scan` would accept the
+    /// inputs — a click should never reach a rejection in the status bar.
+    #[test]
+    fn scan_blocker_tracks_what_the_inputs_allow() {
+        let mut app = CheatuApp::default();
+        assert!(app.scan_blocker(true).is_some(), "nothing attached");
+
+        app.scanner = Some(Scanner::new(std::process::id() as i32).unwrap());
+        assert!(app.scan_blocker(true).is_some(), "no value entered");
+        app.value_text = "100".into();
+        assert!(app.scan_blocker(true).is_none());
+        app.value_text = "6400000..6500000".into();
+        assert!(app.scan_blocker(true).is_none(), "a range is a first scan");
+
+        // An unknown-value scan keeps every address, so it needs no value.
+        app.value_text.clear();
+        app.unknown_initial = true;
+        assert!(app.scan_blocker(true).is_none());
+        app.unknown_initial = false;
+
+        // Narrowing needs a first scan to narrow...
+        assert!(app.scan_blocker(false).is_some(), "nothing scanned yet");
+        app.scanner
+            .as_mut()
+            .unwrap()
+            .first_scan(FirstScan::Value {
+                value: "424242".into(),
+                types: vec![ScanType::I32],
+            })
+            .unwrap();
+        // ...and a value only for the comparisons that read one.
+        app.next_mode = NextMode::Changed;
+        assert!(app.scan_blocker(false).is_none());
+        app.next_mode = NextMode::Greater;
+        assert!(
+            app.scan_blocker(false).is_some(),
+            "\"greater than\" needs a value"
+        );
+        app.value_text = "5".into();
+        assert!(app.scan_blocker(false).is_none());
+    }
 }

@@ -65,7 +65,8 @@ The header has two modes: **Memory scanner** (the default) and
 **RPG Maker (JS)** (see the [RPG Maker guide](rpg-maker.md)).
 
 1. **Select process…** and pick your target.
-2. Choose a **Value type**, type the current value, and click **First scan**.
+2. Choose a **Value type**, type the current value, and click **First scan**
+   (or just press Enter in the value box).
    A range works too — `6400000..6500000` for a number you can only bracket.
    (Tick *Unknown initial value* if you don't know it yet.) If you don't know
    the *type* either — you just see a number on screen — pick
@@ -76,10 +77,14 @@ The header has two modes: **Memory scanner** (the default) and
    fit; pick a single type if that happens.
 3. Let the value change in-game, pick a **Next scan** comparison
    (equal / greater / less / increased / decreased / changed / unchanged),
-   and click **Next scan** to narrow the list.
-4. Click **＋** on a result to add it to the **Cheat table** on the right.
-5. In the cheat table, edit the value and **Set** it, or tick **Freeze** to keep
-   rewriting it continuously. **🗑 Clear all** empties the table in one go.
+   and click **Next scan** — or press Enter again — to narrow the list.
+   *increased / decreased / changed / unchanged* compare against the last scan
+   and ignore the value box.
+4. Click **+** on a result to add it to the **Cheat table** on the right.
+5. In the cheat table, edit the value and **Set** it to write it once, or tick
+   **Freeze** to keep rewriting it continuously. Each row shows the address's
+   live value on the right, so you can see the write land. **🗑 Clear all**
+   empties the table in one go.
 
 ## Finding a Steam Play (Proton) game
 
