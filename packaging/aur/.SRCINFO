@@ -21,6 +21,6 @@ pkgbase = cheatu
 	depends = polkit
 	optdepends = noto-fonts-cjk: CJK text rendering in the GUI
 	source = cheatu-1.1.0.tar.gz::https://github.com/carroarmato0/cheatu/archive/refs/tags/v1.1.0.tar.gz
-	sha256sums = 32635fdca97c0f547e9089755af59ef1877fbdf3897e3a139b2dbedf0db5c127
+	sha256sums = 71da4074587595eda4a5b9db3f3a7e541bc90ebc2e59cf380a0ed8edeca7e610
 
 pkgname = cheatu
