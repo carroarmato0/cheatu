@@ -88,7 +88,9 @@ The header has two modes: **Memory scanner** (the default) and
    candidates in the same region. The 🧪 **probe** can: it writes a test value
    and reports whether the game overwrote it (a display copy) or left it
    (likely the real one). Turn it on under **⚙ Settings → Enable probe** — it
-   writes to live game memory.
+   writes to live game memory. **🧪 Probe N** above the results tests up to 32
+   visible addresses in one pass, one at a time, after asking you to confirm;
+   frozen rows are skipped, since a frozen value is being rewritten anyway.
 5. Click **+** on a result to add it to the **Cheat table** on the right.
 6. In the cheat table, edit the value and **Set** it to write it once, or tick
    **Freeze** to keep rewriting it continuously. Each row shows the address's

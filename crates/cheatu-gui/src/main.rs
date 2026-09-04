@@ -29,6 +29,14 @@ const FREEZE_INTERVAL: Duration = Duration::from_millis(40);
 /// before reading back — a couple of frames. Tunable knob.
 const PROBE_WAIT: Duration = Duration::from_millis(200);
 
+/// How many addresses one "Probe all" pass will touch.
+///
+/// Probing writes to live game memory, so the batch is capped rather than
+/// unbounded, and the addresses are probed one at a time — only ever one wrong
+/// value in the game at once, restored before the next. At [`PROBE_WAIT`] each
+/// this is also about as long as anyone will sit and wait.
+const PROBE_BATCH_MAX: usize = 32;
+
 /// Shared state driving the background freeze thread. The UI updates it each
 /// frame; the thread reads it and writes the values into the target — so
 /// freezing keeps working even when the GUI window is hidden or not repainting.
@@ -1293,8 +1301,12 @@ struct CheatuApp {
     /// In-flight probe result, if any. `None` outcome = the probe failed
     /// (e.g. memory not writable), so the busy state still clears.
     probe_pending: Option<Receiver<(u64, Option<ProbeOutcome>)>>,
-    /// Address currently being probed (disables further probes meanwhile).
-    probing: Option<u64>,
+    /// Addresses in the batch being probed, oldest first. Empty when idle.
+    probe_batch: Vec<u64>,
+    /// How many of `probe_batch` are still in flight (disables further probes).
+    probe_remaining: usize,
+    /// Waiting for the user to confirm a batch probe.
+    show_probe_confirm: bool,
     /// Latest probe outcome per address, shown as an icon in the results row.
     probe_results: HashMap<u64, ProbeOutcome>,
 
@@ -1590,30 +1602,79 @@ impl CheatuApp {
     }
 
     fn poll_probe(&mut self) {
-        let done = self
-            .probe_pending
-            .as_ref()
-            .and_then(|rx| rx.try_recv().ok());
-        if let Some((addr, outcome)) = done {
+        // Drain everything that arrived: a batch reports one address at a time
+        // and a frame may cover several.
+        let mut results = Vec::new();
+        if let Some(rx) = &self.probe_pending {
+            while let Ok(msg) = rx.try_recv() {
+                results.push(msg);
+            }
+        }
+        for (addr, outcome) in results {
+            self.probe_remaining = self.probe_remaining.saturating_sub(1);
             match outcome {
                 Some(o) => {
-                    self.status = match o {
-                        ProbeOutcome::Held => {
-                            format!("0x{addr:012x} held — likely the real value.")
-                        }
-                        ProbeOutcome::Reverted => {
-                            format!("0x{addr:012x} reverted — a live copy, probably not it.")
-                        }
-                    };
                     self.probe_results.insert(addr, o);
+                    if self.probe_batch.len() == 1 {
+                        self.status = match o {
+                            ProbeOutcome::Held => {
+                                format!("0x{addr:012x} held — likely the real value.")
+                            }
+                            ProbeOutcome::Reverted => {
+                                format!("0x{addr:012x} reverted — a live copy, probably not it.")
+                            }
+                        };
+                    }
                 }
-                None => {
+                None if self.probe_batch.len() == 1 => {
                     self.status = format!("Probe of 0x{addr:012x} failed — memory not writable?");
                 }
+                // In a batch an unreadable address is just one that can't be
+                // ruled in or out; the summary reports it as untested.
+                None => {}
             }
-            self.probing = None;
+            if self.probe_remaining > 0 {
+                self.status = format!("Probing… {} left.", self.probe_remaining);
+            }
+        }
+        if self.probe_remaining == 0 && self.probe_pending.is_some() {
+            if self.probe_batch.len() > 1 {
+                let held = self.batch_count(ProbeOutcome::Held);
+                let reverted = self.batch_count(ProbeOutcome::Reverted);
+                let untested = self.probe_batch.len() - held - reverted;
+                self.status = format!(
+                    "Probed {}: {held} held, {reverted} reverted{}.",
+                    self.probe_batch.len(),
+                    if untested > 0 {
+                        format!(", {untested} not writable")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
             self.probe_pending = None;
         }
+    }
+
+    /// The addresses a "Probe all" pass would touch: the visible rows, capped
+    /// at [`PROBE_BATCH_MAX`], minus any that are frozen — a frozen address is
+    /// rewritten every [`FREEZE_INTERVAL`], so it would read as "reverted"
+    /// whatever the game does.
+    fn probe_all_targets(&self) -> Vec<(u64, usize)> {
+        self.display
+            .iter()
+            .filter(|d| !self.saved.iter().any(|e| e.frozen && e.addr == d.addr))
+            .take(PROBE_BATCH_MAX)
+            .map(|d| (d.addr, d.prev.ty().size()))
+            .collect()
+    }
+
+    /// How many of the last batch ended with `want`.
+    fn batch_count(&self, want: ProbeOutcome) -> usize {
+        self.probe_batch
+            .iter()
+            .filter(|a| self.probe_results.get(a) == Some(&want))
+            .count()
     }
 
     /// Start the background freeze thread once. It writes frozen values on its
@@ -1700,8 +1761,11 @@ impl eframe::App for CheatuApp {
         // Results column header the user clicked, applied once the table has
         // let go of `self.display`.
         let mut new_res_sort: Option<ResSort> = None;
-        // (addr, size) of a candidate to auto-probe.
-        let mut do_probe: Option<(u64, usize)> = None;
+        // The user asked to probe the whole visible list, and confirmed it.
+        let mut ask_probe_all = false;
+        let mut probe_all = false;
+        // (addr, size) of every candidate to probe this frame.
+        let mut do_probe: Vec<(u64, usize)> = Vec::new();
 
         // ---- Header -----------------------------------------------------
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -2110,6 +2174,24 @@ impl eframe::App for CheatuApp {
                         .small(),
                     );
                 }
+                // Probing one row at a time is fine for three candidates and
+                // tedious for thirty, which is exactly when you need it.
+                if self.enable_probe {
+                    let n = self.display.len().min(PROBE_BATCH_MAX);
+                    if ui
+                        .add_enabled(
+                            n > 0 && !self.scanning && self.probe_remaining == 0,
+                            egui::Button::new(format!("🧪 Probe {n}")).small(),
+                        )
+                        .on_hover_text(
+                            "Write a test value to each of these addresses in turn and see \
+                             which ones the game overwrites. Writes to live game memory.",
+                        )
+                        .clicked()
+                    {
+                        ask_probe_all = true;
+                    }
+                }
             });
             // The probe is the only thing here that tells two same-region
             // candidates apart, and it's invisible until switched on — say so
@@ -2133,7 +2215,7 @@ impl eframe::App for CheatuApp {
             let show_hints = self.show_hints;
             // Auto-probe state, hoisted so the row closure needn't borrow &mut self.
             let enable_probe = self.enable_probe;
-            let probe_busy = self.scanning || self.probing.is_some();
+            let probe_busy = self.scanning || self.probe_remaining > 0;
             let probe_results = &self.probe_results;
             let saved = &self.saved;
             let res_sort = self.res_sort;
@@ -2266,7 +2348,7 @@ impl eframe::App for CheatuApp {
                                     )
                                 };
                                 if btn.clicked() {
-                                    do_probe = Some((d.addr, ty.size()));
+                                    do_probe.push((d.addr, ty.size()));
                                 }
                             }
                             match probe_results.get(&d.addr) {
@@ -2495,6 +2577,57 @@ impl eframe::App for CheatuApp {
             }
         }
 
+        // ---- Confirm a batch probe --------------------------------------
+        // One probe is a small, reversible poke; thirty in a row is a real
+        // chance to upset the game, so this one asks first.
+        if self.show_probe_confirm {
+            let n = self.display.len().min(PROBE_BATCH_MAX);
+            egui::Window::new("Probe these addresses?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "cheatu will write a test value to {n} address{} in the running game, \
+                         one at a time, restoring each one the game doesn't overwrite.",
+                        if n == 1 { "" } else { "es" }
+                    ));
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "This changes live game memory. A game that reads one of these \
+                             values at the wrong moment can misbehave or crash — save first.",
+                        )
+                        .color(warn_color(ui)),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Takes about {:.0} seconds. Frozen rows are skipped.",
+                            n as f32 * PROBE_WAIT.as_secs_f32()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Probe").clicked() {
+                            probe_all = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_probe_confirm = false;
+                        }
+                    });
+                });
+        }
+        if ask_probe_all {
+            self.show_probe_confirm = true;
+        }
+        if probe_all {
+            self.show_probe_confirm = false;
+            do_probe = self.probe_all_targets();
+        }
+
         // ---- About ------------------------------------------------------
         egui::Window::new("About cheatu")
             .open(&mut self.show_about)
@@ -2639,17 +2772,28 @@ impl eframe::App for CheatuApp {
 
         // Auto-probe a candidate in the background (opens its own Mem handle, like
         // the freeze thread, so it doesn't need the Scanner). One at a time.
-        if let (Some((addr, size)), None) = (do_probe, &self.probing) {
+        if !do_probe.is_empty() && self.probe_remaining == 0 {
             if let Some((pid, _)) = self.attached {
                 let (tx, rx) = mpsc::channel();
                 self.probe_pending = Some(rx);
-                self.probing = Some(addr);
-                self.status = format!("Probing 0x{addr:012x}…");
+                self.probe_batch = do_probe.iter().map(|(addr, _)| *addr).collect();
+                self.probe_remaining = do_probe.len();
+                self.status = match do_probe.as_slice() {
+                    [(addr, _)] => format!("Probing 0x{addr:012x}…"),
+                    batch => format!("Probing {} addresses…", batch.len()),
+                };
                 std::thread::spawn(move || {
-                    let outcome = Mem::open(pid)
-                        .ok()
-                        .and_then(|mem| probe_address(&mem, addr, size, PROBE_WAIT).ok());
-                    let _ = tx.send((addr, outcome));
+                    let mem = Mem::open(pid).ok();
+                    // One at a time: only ever one perturbed value in the game,
+                    // and it is restored before the next is touched.
+                    for (addr, size) in do_probe {
+                        let outcome = mem
+                            .as_ref()
+                            .and_then(|m| probe_address(m, addr, size, PROBE_WAIT).ok());
+                        if tx.send((addr, outcome)).is_err() {
+                            break;
+                        }
+                    }
                 });
             }
         }
@@ -2767,6 +2911,38 @@ mod tests {
         let mut expected = labels.clone();
         expected.sort();
         assert_eq!(labels, expected);
+    }
+
+    /// "Probe all" skips frozen rows and stops at the cap, so it can't write to
+    /// an unbounded number of addresses in a live game.
+    #[test]
+    fn probe_all_skips_frozen_rows_and_stops_at_the_cap() {
+        let mut app = CheatuApp {
+            display: (0..PROBE_BATCH_MAX as u64 + 10)
+                .map(|i| DisplayRow {
+                    addr: 0x1000 + i * 4,
+                    prev: ScanValue::I32(1),
+                    hint: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(app.probe_all_targets().len(), PROBE_BATCH_MAX);
+        assert_eq!(app.probe_all_targets()[0], (0x1000, 4));
+
+        app.saved.push(SavedEntry {
+            desc: String::new(),
+            addr: 0x1000,
+            ty: ScanType::I32,
+            value_text: "1".into(),
+            frozen: true,
+        });
+        let targets = app.probe_all_targets();
+        assert_eq!(targets.len(), PROBE_BATCH_MAX, "the cap still fills up");
+        assert!(
+            !targets.iter().any(|(addr, _)| *addr == 0x1000),
+            "a frozen address would read as reverted whatever the game does"
+        );
     }
 
     /// The scan buttons are enabled exactly when `start_scan` would accept the
