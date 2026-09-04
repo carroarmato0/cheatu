@@ -95,9 +95,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set pkgver from tag
+      # GitHub generates the source tarball when the tag is pushed, so its
+      # checksum can only be known here. Without this the PKGBUILD would ship
+      # the previous release's sum and every AUR build would fail on it.
+      - name: Set pkgver and checksum from tag
         run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          sum=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
           sed -i "s/^pkgver=.*/pkgver=${GITHUB_REF_NAME#v}/" packaging/aur/PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" packaging/aur/PKGBUILD
 
       - name: Publish to AUR
         uses: KSXGitHub/github-actions-deploy-aur@v2.7.2

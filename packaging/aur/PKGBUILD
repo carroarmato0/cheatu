@@ -10,7 +10,7 @@ depends=('gcc-libs' 'polkit' 'fontconfig')
 optdepends=('noto-fonts-cjk: CJK text rendering in the GUI')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('32635fdca97c0f547e9089755af59ef1877fbdf3897e3a139b2dbedf0db5c127')
 
 prepare() {
     cd "$pkgname-$pkgver"
