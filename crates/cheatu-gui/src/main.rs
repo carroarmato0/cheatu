@@ -350,6 +350,30 @@ enum ProcSort {
     Name,
 }
 
+/// Column used to sort the results table.
+///
+/// Only offered while the whole result set is on screen — sorting the first
+/// [`MAX_DISPLAY`] of a million would just reshuffle an arbitrary slice.
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
+enum ResSort {
+    #[default]
+    Address,
+    Type,
+    Previous,
+    /// Best-looking region first, unranked last.
+    Region,
+}
+
+/// Sort key for [`ResSort::Region`]: lower sorts first.
+fn region_rank(hint: Option<AddrHint>) -> u8 {
+    match hint.map(|h| h.confidence) {
+        Some(Confidence::Likely) => 0,
+        Some(Confidence::Neutral) => 1,
+        Some(Confidence::Unlikely) => 2,
+        None => 3,
+    }
+}
+
 /// A snapshot row shown in the results table.
 struct DisplayRow {
     addr: u64,
@@ -1237,6 +1261,8 @@ struct CheatuApp {
     proc_filter: String,
     procs: Vec<ProcInfo>,
     picker_sort: ProcSort,
+    /// Column the results table is sorted by.
+    res_sort: ResSort,
     picker_wine_only: bool,
     picker_selected: Option<i32>,
 
@@ -1513,6 +1539,23 @@ impl CheatuApp {
                 });
             }
         }
+        self.sort_display();
+    }
+
+    /// Order the displayed rows by the chosen column. Stable, so rows that tie
+    /// keep the address order the scanner produced them in.
+    fn sort_display(&mut self) {
+        match self.res_sort {
+            ResSort::Address => self.display.sort_by_key(|d| d.addr),
+            ResSort::Type => self.display.sort_by_key(|d| d.prev.ty().friendly_label()),
+            ResSort::Previous => self.display.sort_by(|a, b| {
+                a.prev
+                    .as_f64()
+                    .partial_cmp(&b.prev.as_f64())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            ResSort::Region => self.display.sort_by_key(|d| region_rank(d.hint)),
+        }
     }
 
     fn reset_scan(&mut self) {
@@ -1654,6 +1697,9 @@ impl eframe::App for CheatuApp {
         let mut clear_table = false;
         // Index of the cheat table row whose value should be written once.
         let mut do_set: Option<usize> = None;
+        // Results column header the user clicked, applied once the table has
+        // let go of `self.display`.
+        let mut new_res_sort: Option<ResSort> = None;
         // (addr, size) of a candidate to auto-probe.
         let mut do_probe: Option<(u64, usize)> = None;
 
@@ -2048,16 +2094,36 @@ impl eframe::App for CheatuApp {
             }
 
             ui.separator();
+            // Sorting an arbitrary first-2000 slice of a million candidates
+            // would be theatre, so the headers only sort once the whole set is
+            // on screen — which is also the point where triage starts.
+            let can_sort = self.result_count <= self.display.len();
             ui.horizontal(|ui| {
                 ui.strong(format!("{} results", self.result_count));
-                if self.result_count > self.display.len() {
+                if !can_sort {
                     ui.label(
-                        egui::RichText::new(format!("(showing first {})", self.display.len()))
-                            .weak()
-                            .small(),
+                        egui::RichText::new(format!(
+                            "— showing the first {}. Narrow further to see and sort them all.",
+                            self.display.len()
+                        ))
+                        .weak()
+                        .small(),
                     );
                 }
             });
+            // The probe is the only thing here that tells two same-region
+            // candidates apart, and it's invisible until switched on — say so
+            // once the list is short enough that it's the obvious next step.
+            if !self.enable_probe && self.result_count > 1 && self.result_count <= HINT_THRESHOLD {
+                ui.label(
+                    egui::RichText::new(
+                        "Can't tell these apart? Turn on “Enable probe” in ⚙ Settings — it \
+                         writes a test value and sees which address the game overwrites.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
 
             // Results table (virtualized). Each row carries its own type, so
             // "Any" scans show a mix of i32/f32/… hits with the right decoding.
@@ -2070,6 +2136,7 @@ impl eframe::App for CheatuApp {
             let probe_busy = self.scanning || self.probing.is_some();
             let probe_results = &self.probe_results;
             let saved = &self.saved;
+            let res_sort = self.res_sort;
             let mut table = TableBuilder::new(ui)
                 .striped(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -2086,24 +2153,42 @@ impl eframe::App for CheatuApp {
             table
                 .column(Column::remainder())
                 .header(20.0, |mut header| {
+                    // A sortable header, or a plain one while the list is
+                    // truncated, explaining why it won't sort.
+                    let mut sort_col = |header: &mut egui_extras::TableRow, col, text| {
+                        header.col(|ui| {
+                            if !can_sort {
+                                ui.strong(text).on_hover_text(
+                                    "Narrow the results until they all fit to sort them.",
+                                );
+                            } else if sort_header(ui, text, res_sort == col).clicked() {
+                                new_res_sort = Some(col);
+                            }
+                        });
+                    };
+                    sort_col(&mut header, ResSort::Address, "Address");
+                    sort_col(&mut header, ResSort::Type, "Type");
+                    sort_col(&mut header, ResSort::Previous, "Previous");
                     header.col(|ui| {
-                        ui.strong("Address");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Type");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Previous");
-                    });
-                    header.col(|ui| {
+                        // Not sortable: it's read live, so any order would be
+                        // stale by the next frame.
                         ui.strong("Current");
                     });
                     if show_hints {
                         header.col(|ui| {
-                            ui.strong("Hint").on_hover_text(
-                                "Heuristic guess at which candidate is the real game value, \
-                                 from its memory region and type. A nudge, not proof — it can't \
-                                 tell apart two candidates in the same region.",
+                            let resp = if !can_sort {
+                                ui.strong("Region")
+                            } else {
+                                let r = sort_header(ui, "Region", res_sort == ResSort::Region);
+                                if r.clicked() {
+                                    new_res_sort = Some(ResSort::Region);
+                                }
+                                r
+                            };
+                            resp.on_hover_text(
+                                "Which kind of memory the address lives in — a weak guess at \
+                                 whether it's the real value. It can't tell apart two \
+                                 candidates in the same region; the probe (🧪) can.",
                             );
                         });
                     }
@@ -2523,6 +2608,10 @@ impl eframe::App for CheatuApp {
                 frozen: false,
             });
         }
+        if let Some(col) = new_res_sort.filter(|c| *c != self.res_sort) {
+            self.res_sort = col;
+            self.sort_display();
+        }
         if clear_table {
             // sync_freezes() runs each frame, so dropping the rows also lifts
             // their freezes.
@@ -2614,6 +2703,71 @@ fn read_current(scanner: &Scanner, addr: u64, ty: ScanType) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn addrs(app: &CheatuApp) -> Vec<u64> {
+        app.display.iter().map(|d| d.addr).collect()
+    }
+
+    /// Each header orders by what it says, and the "Region" column puts the
+    /// candidates worth looking at first.
+    #[test]
+    fn sorting_results_orders_by_the_clicked_column() {
+        let likely = AddrHint {
+            confidence: Confidence::Likely,
+            label: "heap",
+        };
+        let unlikely = AddrHint {
+            confidence: Confidence::Unlikely,
+            label: "stack",
+        };
+        let mut app = CheatuApp {
+            display: vec![
+                DisplayRow {
+                    addr: 0x30,
+                    prev: ScanValue::I32(5),
+                    hint: Some(unlikely),
+                },
+                DisplayRow {
+                    addr: 0x10,
+                    prev: ScanValue::F32(1.5),
+                    hint: None,
+                },
+                DisplayRow {
+                    addr: 0x20,
+                    prev: ScanValue::I32(-3),
+                    hint: Some(likely),
+                },
+            ],
+            ..Default::default()
+        };
+
+        app.res_sort = ResSort::Address;
+        app.sort_display();
+        assert_eq!(addrs(&app), [0x10, 0x20, 0x30]);
+
+        app.res_sort = ResSort::Previous;
+        app.sort_display();
+        assert_eq!(addrs(&app), [0x20, 0x10, 0x30], "-3 < 1.5 < 5");
+
+        app.res_sort = ResSort::Region;
+        app.sort_display();
+        assert_eq!(
+            addrs(&app),
+            [0x20, 0x30, 0x10],
+            "likely, then unlikely, then unranked"
+        );
+
+        app.res_sort = ResSort::Type;
+        app.sort_display();
+        let labels: Vec<String> = app
+            .display
+            .iter()
+            .map(|d| d.prev.ty().friendly_label())
+            .collect();
+        let mut expected = labels.clone();
+        expected.sort();
+        assert_eq!(labels, expected);
+    }
 
     /// The scan buttons are enabled exactly when `start_scan` would accept the
     /// inputs — a click should never reach a rejection in the status bar.

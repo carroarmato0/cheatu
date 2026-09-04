@@ -82,8 +82,15 @@ The header has two modes: **Memory scanner** (the default) and
    and ignore the value box.
    A running scan shows its progress in the status bar with a **Cancel**
    button; cancelling leaves the results you already had untouched.
-4. Click **+** on a result to add it to the **Cheat table** on the right.
-5. In the cheat table, edit the value and **Set** it to write it once, or tick
+4. Once the whole result set fits on screen, click a column header —
+   **Address**, **Type**, **Previous**, **Region** — to sort it. **Region** only
+   says what kind of memory an address lives in; it cannot separate two
+   candidates in the same region. The 🧪 **probe** can: it writes a test value
+   and reports whether the game overwrote it (a display copy) or left it
+   (likely the real one). Turn it on under **⚙ Settings → Enable probe** — it
+   writes to live game memory.
+5. Click **+** on a result to add it to the **Cheat table** on the right.
+6. In the cheat table, edit the value and **Set** it to write it once, or tick
    **Freeze** to keep rewriting it continuously. Each row shows the address's
    live value on the right, so you can see the write land. **🗑 Clear all**
    empties the table in one go.
