@@ -1,6 +1,6 @@
 # Maintainer: Christophe Vanlancker <carroarmato0@gmail.com>
 pkgname=cheatu
-pkgver=0.1.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Memory scanner and cheat tool for Linux (CLI + GUI), inspired by Cheat Engine and scanmem"
 arch=('x86_64')

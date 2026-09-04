@@ -48,6 +48,18 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.1.0" date="2026-09-04">
+      <description>
+        <p>Scanning: search a range of values when you can only bracket a
+           number, scan for an unknown value as every type at once, and cancel
+           a running scan — which now reports its progress. Large unknown-value
+           scans are refused up front instead of exhausting memory.</p>
+        <p>Results: sort the results table, and probe every visible candidate
+           in one pass to see which address the game overwrites.</p>
+        <p>Cheat table: write a value once without freezing it, and watch each
+           address's live value as you do.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-07-09">
       <description>
         <p>Initial release: multithreaded memory scanner (CLI + GUI) and the
