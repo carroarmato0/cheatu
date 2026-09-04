@@ -3,7 +3,7 @@
 
 use std::hint::black_box;
 
-use cheatu_core::scan::{parse_aob, FirstScan, NextScan, Scanner, ANY_TYPES};
+use cheatu_core::scan::{parse_aob, parse_range, FirstScan, NextScan, Scanner, ANY_TYPES};
 use cheatu_core::{ScanType, ScanValue};
 
 fn own_pid() -> i32 {
@@ -161,6 +161,55 @@ fn any_scan_finds_value_regardless_of_type() {
     );
 
     black_box((&as_float, &as_int));
+}
+
+#[test]
+fn parse_range_reads_inclusive_ranges_only() {
+    assert_eq!(
+        parse_range("6400000..6500000"),
+        Some((6400000.0, 6500000.0))
+    );
+    assert_eq!(parse_range(" -5 .. 2.5 "), Some((-5.0, 2.5)));
+    assert_eq!(parse_range("100"), None, "a plain value is not a range");
+    assert_eq!(parse_range("500..100"), None, "backwards range");
+    assert_eq!(parse_range("a..b"), None);
+}
+
+#[test]
+fn range_scan_finds_a_value_you_can_only_bracket() {
+    // The case this exists for: an on-screen counter reads "a bit over 6.4M",
+    // so the exact number to scan for is unknown.
+    let gold = Box::new(6_437_912i32);
+    let addr = &*gold as *const i32 as u64;
+
+    let mut sc = Scanner::new(own_pid()).unwrap();
+    sc.first_scan(FirstScan::Range {
+        low: 6_400_000.0,
+        high: 6_500_000.0,
+        types: ANY_TYPES.to_vec(),
+    })
+    .unwrap();
+    assert!(
+        sc.results()
+            .iter()
+            .any(|c| c.addr == addr && c.ty() == ScanType::I32),
+        "value inside the range was not found"
+    );
+
+    // A range that excludes it must not keep it.
+    let mut sc2 = Scanner::new(own_pid()).unwrap();
+    sc2.first_scan(FirstScan::Range {
+        low: 1.0,
+        high: 1000.0,
+        types: ANY_TYPES.to_vec(),
+    })
+    .unwrap();
+    assert!(
+        !sc2.results().iter().any(|c| c.addr == addr),
+        "value outside the range was wrongly kept"
+    );
+
+    black_box(&gold);
 }
 
 #[test]

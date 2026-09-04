@@ -44,6 +44,10 @@ Narrowing operators: a bare number (equals), `= N`, `> N`, `< N`, `!= N`,
 `inc`, `dec`, `changed`, `unchanged`. Use `scan ?` for an unknown-initial-value
 search.
 
+**Can't read the exact number?** Bracket it: `scan 6400000..6500000` keeps every
+value in that range, so a gold counter you only know is "a bit over 6.4M" is
+still findable. Then narrow normally as the value changes.
+
 **Don't know the type?** Use `type any` before the first scan. cheatu then
 searches for your value as an i32, u32, i64, u64, f32, and f64 simultaneously,
 and each surviving candidate remembers which type actually matched:
@@ -62,16 +66,20 @@ The header has two modes: **Memory scanner** (the default) and
 
 1. **Select process…** and pick your target.
 2. Choose a **Value type**, type the current value, and click **First scan**.
+   A range works too — `6400000..6500000` for a number you can only bracket.
    (Tick *Unknown initial value* if you don't know it yet.) If you don't know
    the *type* either — you just see a number on screen — pick
    **Any (unknown type)**; cheatu scans it as every common width at once and the
-   results table's **Type** column tells you what each hit really is.
+   results table's **Type** column tells you what each hit really is. *Unknown
+   initial value* works with **Any** too — it keeps every address as every type,
+   so it needs a lot of memory and aborts with a message if the results wouldn't
+   fit; pick a single type if that happens.
 3. Let the value change in-game, pick a **Next scan** comparison
    (equal / greater / less / increased / decreased / changed / unchanged),
    and click **Next scan** to narrow the list.
 4. Click **＋** on a result to add it to the **Cheat table** on the right.
 5. In the cheat table, edit the value and **Set** it, or tick **Freeze** to keep
-   rewriting it continuously.
+   rewriting it continuously. **🗑 Clear all** empties the table in one go.
 
 ## Finding a Steam Play (Proton) game
 

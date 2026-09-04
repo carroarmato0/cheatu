@@ -122,12 +122,38 @@ pub enum FirstScan {
     /// it is an "unknown type" search. Types that can't parse `value` are
     /// skipped, so results only contain plausible interpretations.
     Value { value: String, types: Vec<ScanType> },
-    /// Keep every scannable address, decoded as one type (unknown value).
-    Unknown(ScanType),
+    /// Match any value in the inclusive range `low..=high`, decoded as each of
+    /// `types`.
+    ///
+    /// This is the scan for a number you can only bracket: a gold counter you
+    /// can see is "a bit over 6,400,000" gives an exact-value scan nothing to
+    /// search for, but `6400000..6500000` finds it, and it stays cheap because
+    /// only matches are stored.
+    Range {
+        low: f64,
+        high: f64,
+        types: Vec<ScanType>,
+    },
+    /// Keep every scannable address, decoded as each of `types` (unknown
+    /// value). One type is an ordinary unknown-value search; [`ANY_TYPES`]
+    /// is an unknown value *and* unknown type — costly, since every address
+    /// is stored once per type (see [`candidate_cap`]).
+    Unknown(Vec<ScanType>),
     /// Match a byte pattern — `None` entries are wildcards. Used for both
     /// Array-of-Bytes (via [`parse_aob`]) and String searches (plain UTF-8
     /// bytes, no wildcards).
     Pattern(Vec<Option<u8>>),
+}
+
+/// Parse an inclusive range such as `"6400000..6500000"`.
+///
+/// Returns `None` when the text isn't a range or either end isn't a number, so
+/// callers can fall back to treating the input as a single value.
+pub fn parse_range(s: &str) -> Option<(f64, f64)> {
+    let (low, high) = s.split_once("..")?;
+    let low: f64 = low.trim().parse().ok()?;
+    let high: f64 = high.trim().parse().ok()?;
+    (low <= high).then_some((low, high))
 }
 
 /// Parse a space-separated hex byte pattern such as `"48 65 ?? 6C 6F"` into
@@ -290,11 +316,26 @@ impl Scanner {
             regions.into_iter().filter(|r| r.is_scannable()).collect();
         let items = work_items(&scannable);
 
+        let budget = Budget::new(candidate_cap());
+
         let mut results = match scan {
-            FirstScan::Unknown(ty) => self
-                .parallel_scan(&items, move |mem, start, end, buf, out| {
-                    scan_unknown_range(mem, start, end, ty, buf, out)
-                }),
+            FirstScan::Unknown(types) => {
+                if types.is_empty() {
+                    Vec::new()
+                } else {
+                    // An unknown-value scan keeps every aligned slot of every
+                    // type, so its size is known before a single byte is read.
+                    // Refuse up front rather than allocating gigabytes and
+                    // getting OOM-killed halfway through.
+                    let want = unknown_candidate_count(&items, &types);
+                    if want > budget.cap as u64 {
+                        return Err(too_many(want, budget.cap));
+                    }
+                    self.parallel_scan(&items, &budget, |mem, start, end, buf, out| {
+                        scan_unknown_range(mem, start, end, &types, buf, out, &budget)
+                    })?
+                }
+            }
             FirstScan::Value { value, types } => {
                 // Precompute (type, target) pairs for every type that can
                 // represent the entered value.
@@ -305,18 +346,27 @@ impl Scanner {
                 if targets.is_empty() {
                     Vec::new()
                 } else {
-                    self.parallel_scan(&items, |mem, start, end, buf, out| {
-                        scan_value_range(mem, start, end, &targets, buf, out)
-                    })
+                    self.parallel_scan(&items, &budget, |mem, start, end, buf, out| {
+                        scan_value_range(mem, start, end, &targets, buf, out, &budget)
+                    })?
+                }
+            }
+            FirstScan::Range { low, high, types } => {
+                if types.is_empty() {
+                    Vec::new()
+                } else {
+                    self.parallel_scan(&items, &budget, |mem, start, end, buf, out| {
+                        scan_range_range(mem, start, end, &types, low, high, buf, out, &budget)
+                    })?
                 }
             }
             FirstScan::Pattern(pattern) => {
                 if pattern.is_empty() {
                     Vec::new()
                 } else {
-                    self.parallel_scan(&items, |mem, start, end, buf, out| {
-                        scan_pattern_range(mem, start, end, &pattern, buf, out)
-                    })
+                    self.parallel_scan(&items, &budget, |mem, start, end, buf, out| {
+                        scan_pattern_range(mem, start, end, &pattern, buf, out, &budget)
+                    })?
                 }
             }
         };
@@ -332,7 +382,17 @@ impl Scanner {
 
     /// Distribute `items` across worker threads, each running `scan_one` on a
     /// slice into its own buffer and local result vector, then concatenate.
-    fn parallel_scan<F>(&self, items: &[(u64, u64)], scan_one: F) -> Vec<Candidate>
+    ///
+    /// `scan_one` charges every chunk it stores against `budget`; once that is
+    /// spent the workers stop and the scan fails instead of exhausting RAM.
+    /// The per-thread vectors are dropped without being merged in that case, so
+    /// the failure path never pays for the concatenation.
+    fn parallel_scan<F>(
+        &self,
+        items: &[(u64, u64)],
+        budget: &Budget,
+        scan_one: F,
+    ) -> io::Result<Vec<Candidate>>
     where
         F: Fn(&Mem, u64, u64, &mut [u8], &mut Vec<Candidate>) + Sync,
     {
@@ -341,7 +401,7 @@ impl Scanner {
         let scan_one = &scan_one;
         let threads = worker_count().min(items.len().max(1));
 
-        std::thread::scope(|s| {
+        let locals: Vec<Vec<Candidate>> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..threads)
                 .map(|_| {
                     s.spawn(|| {
@@ -349,7 +409,7 @@ impl Scanner {
                         let mut local = Vec::new();
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
-                            if i >= items.len() {
+                            if i >= items.len() || budget.spent() {
                                 break;
                             }
                             let (start, end) = items[i];
@@ -360,12 +420,22 @@ impl Scanner {
                 })
                 .collect();
 
-            let mut all = Vec::new();
-            for h in handles {
-                all.extend(h.join().expect("scan worker panicked"));
-            }
-            all
-        })
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("scan worker panicked"))
+                .collect()
+        });
+
+        if budget.spent() {
+            return Err(too_many(budget.charged() as u64, budget.cap));
+        }
+        // Exact capacity up front: growing by doubling would briefly hold two
+        // copies of a result set that is already sized to the budget.
+        let mut all = Vec::with_capacity(locals.iter().map(Vec::len).sum());
+        for local in locals {
+            all.extend(local);
+        }
+        Ok(all)
     }
 
     /// Refine the candidate set with a next scan, in parallel.
@@ -456,6 +526,62 @@ impl Scanner {
     }
 }
 
+/// How many candidates all worker threads of one scan may hold between them.
+///
+/// Charged per chunk read rather than per work item: a work item is 8 MiB, and
+/// an "any type" unknown scan turns that into ~9 million candidates, so a
+/// per-item check let 16 threads overshoot by gigabytes before anyone noticed.
+struct Budget {
+    charged: AtomicUsize,
+    cap: usize,
+}
+
+impl Budget {
+    fn new(cap: usize) -> Budget {
+        Budget {
+            charged: AtomicUsize::new(0),
+            cap,
+        }
+    }
+
+    /// Account for `n` newly stored candidates. Returns false once the budget
+    /// is spent, meaning the caller should stop scanning.
+    fn charge(&self, n: usize) -> bool {
+        self.charged.fetch_add(n, Ordering::Relaxed) + n <= self.cap
+    }
+
+    fn charged(&self) -> usize {
+        self.charged.load(Ordering::Relaxed)
+    }
+
+    fn spent(&self) -> bool {
+        self.charged() > self.cap
+    }
+}
+
+/// The error for a scan whose results wouldn't fit in [`candidate_cap`].
+fn too_many(wanted: u64, cap: usize) -> io::Error {
+    let gib = |n: u64| n as f64 * std::mem::size_of::<Candidate>() as f64 / (1u64 << 30) as f64;
+    io::Error::other(format!(
+        "this scan would keep about {wanted} candidates (~{:.1} GiB), but only ~{:.1} GiB of \
+         memory is free for results — scan for a value you can see, or pick one type instead \
+         of \"any\"",
+        gib(wanted),
+        gib(cap as u64)
+    ))
+}
+
+/// How many candidates an unknown-value scan over `items` would store: every
+/// 8-byte-aligned slot of every type, counted exactly as [`scan_unknown_range`]
+/// walks it. Every numeric width divides 8, so this is exact, not a guess.
+fn unknown_candidate_count(items: &[(u64, u64)], types: &[ScanType]) -> u64 {
+    let per_8_bytes: u64 = types.iter().map(|t| 8 / t.size().max(1) as u64).sum();
+    items
+        .iter()
+        .map(|(start, end)| (end - start) / 8 * per_8_bytes)
+        .sum()
+}
+
 /// Split scannable regions into value-aligned work items of at most
 /// [`WORK_ITEM`] bytes, so worker threads share the load evenly even when one
 /// region (e.g. a game's main heap) dwarfs the rest.
@@ -505,7 +631,9 @@ fn scan_value_range(
     targets: &[(ScanType, ScanValue)],
     buf: &mut [u8],
     out: &mut Vec<Candidate>,
+    budget: &Budget,
 ) {
+    let mut charged = out.len();
     let mut addr = start;
     while addr < end {
         let want = ((end - addr) as usize).min(buf.len());
@@ -532,6 +660,62 @@ fn scan_value_range(
                 off += size;
             }
         }
+        if !budget.charge(out.len() - charged) {
+            return;
+        }
+        charged = out.len();
+        addr += if usable > 0 { usable as u64 } else { n as u64 };
+    }
+}
+
+/// Scan `[start, end)` for values within `low..=high`, appending hits to `out`.
+///
+/// Comparison is numeric (`as_f64`), so one range covers integer and float
+/// candidates alike; NaN bit patterns compare false and are skipped.
+#[allow(clippy::too_many_arguments)]
+fn scan_range_range(
+    mem: &Mem,
+    start: u64,
+    end: u64,
+    types: &[ScanType],
+    low: f64,
+    high: f64,
+    buf: &mut [u8],
+    out: &mut Vec<Candidate>,
+    budget: &Budget,
+) {
+    let mut charged = out.len();
+    let mut addr = start;
+    while addr < end {
+        let want = ((end - addr) as usize).min(buf.len());
+        let n = match mem.read_at(addr, &mut buf[..want]) {
+            Ok(n) if n > 0 => n,
+            _ => {
+                addr += want as u64;
+                continue;
+            }
+        };
+        let usable = (n / 8) * 8;
+        for ty in types {
+            let size = ty.size();
+            let mut off = 0;
+            while off + size <= usable {
+                let v = ScanValue::from_ne_bytes(*ty, &buf[off..off + size])
+                    .expect("slice is exactly one value wide");
+                let as_num = v.as_f64();
+                if as_num >= low && as_num <= high {
+                    out.push(Candidate {
+                        addr: addr + off as u64,
+                        prev: v,
+                    });
+                }
+                off += size;
+            }
+        }
+        if !budget.charge(out.len() - charged) {
+            return;
+        }
+        charged = out.len();
         addr += if usable > 0 { usable as u64 } else { n as u64 };
     }
 }
@@ -551,11 +735,13 @@ fn scan_pattern_range(
     pattern: &[Option<u8>],
     buf: &mut [u8],
     out: &mut Vec<Candidate>,
+    budget: &Budget,
 ) {
     let plen = pattern.len();
     if plen == 0 || (end - start) < plen as u64 {
         return;
     }
+    let mut charged = out.len();
     let mut addr = start;
     while addr < end {
         let want = ((end - addr) as usize).min(buf.len());
@@ -579,6 +765,10 @@ fn scan_pattern_range(
         } else {
             addr += n as u64;
         }
+        if !budget.charge(out.len() - charged) {
+            return;
+        }
+        charged = out.len();
     }
 }
 
@@ -589,16 +779,19 @@ fn pattern_matches(pattern: &[Option<u8>], data: &[u8]) -> bool {
         .all(|(p, b)| p.is_none_or(|want| want == *b))
 }
 
-/// Store every aligned slot of one type in `[start, end)` (unknown value scan).
+/// Store every aligned slot of each type in `[start, end)` (unknown value
+/// scan). With several types the same address appears once per type, each
+/// candidate carrying its own interpretation of those bytes.
 fn scan_unknown_range(
     mem: &Mem,
     start: u64,
     end: u64,
-    ty: ScanType,
+    types: &[ScanType],
     buf: &mut [u8],
     out: &mut Vec<Candidate>,
+    budget: &Budget,
 ) {
-    let size = ty.size();
+    let mut charged = out.len();
     let mut addr = start;
     while addr < end {
         let want = ((end - addr) as usize).min(buf.len());
@@ -609,17 +802,126 @@ fn scan_unknown_range(
                 continue;
             }
         };
-        let usable = (n / size) * size;
-        let mut off = 0;
-        while off + size <= usable {
-            let v = ScanValue::from_ne_bytes(ty, &buf[off..off + size])
-                .expect("slice is exactly one value wide");
-            out.push(Candidate {
-                addr: addr + off as u64,
-                prev: v,
-            });
-            off += size;
+        // Advance by whole 8-byte units so no value straddles a read boundary,
+        // whatever the widest type is.
+        let usable = (n / 8) * 8;
+        for ty in types {
+            let size = ty.size();
+            let mut off = 0;
+            while off + size <= usable {
+                let v = ScanValue::from_ne_bytes(*ty, &buf[off..off + size])
+                    .expect("slice is exactly one value wide");
+                out.push(Candidate {
+                    addr: addr + off as u64,
+                    prev: v,
+                });
+                off += size;
+            }
         }
+        if !budget.charge(out.len() - charged) {
+            return;
+        }
+        charged = out.len();
         addr += if usable > 0 { usable as u64 } else { n as u64 };
+    }
+}
+
+/// How many candidates a single scan may collect before it is abandoned.
+///
+/// An unknown-value scan stores one candidate per aligned slot *per type*, so
+/// "any type" over a multi-gigabyte process would ask for far more memory than
+/// the machine has.
+///
+/// A quarter of `MemAvailable`, not half: the stored candidates are not the
+/// whole cost. Worker vectors grow by doubling (capacity runs ahead of length)
+/// and are then concatenated into one result vector, so peak usage is roughly
+/// twice the payload. Budgeting half of memory for the payload is how an
+/// "any type" unknown scan managed to get cheatu OOM-killed.
+///
+// ponytail: MemAvailable read once per scan; good enough, no watchdog.
+fn candidate_cap() -> usize {
+    const FALLBACK: usize = 8 << 30; // 8 GiB if /proc/meminfo is unreadable
+    let available = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|l| l.strip_prefix("MemAvailable:"))
+                .and_then(|rest| rest.split_whitespace().next()?.parse::<usize>().ok())
+                .map(|kb| kb * 1024)
+        })
+        .unwrap_or(FALLBACK);
+    (available / 4) / std::mem::size_of::<Candidate>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unknown-value scan over several types stores each address once per
+    /// type, so the same slot is tracked as both an integer and a float.
+    #[test]
+    fn unknown_scan_stores_every_type_at_each_slot() {
+        // 8-aligned, so both the 4- and 8-byte types start at its address.
+        let block = Box::new([7i64; 8]);
+        let start = &*block as *const i64 as u64;
+        let end = start + std::mem::size_of_val(&*block) as u64;
+
+        let mem = Mem::open(std::process::id() as i32).unwrap();
+        let mut buf = vec![0u8; 64];
+        let mut out = Vec::new();
+        let budget = Budget::new(usize::MAX);
+        scan_unknown_range(&mem, start, end, &ANY_TYPES, &mut buf, &mut out, &budget);
+
+        let here: Vec<ScanType> = out
+            .iter()
+            .filter(|c| c.addr == start)
+            .map(|c| c.ty())
+            .collect();
+        for ty in ANY_TYPES {
+            assert!(here.contains(&ty), "{ty} candidate missing at first slot");
+        }
+        assert!(out
+            .iter()
+            .any(|c| c.addr == start && matches!(c.prev, ScanValue::I64(7))));
+        // Every 4-byte slot and every 8-byte slot in the block is covered...
+        assert_eq!(out.len(), (8 * 2) * 3 + 8 * 3);
+        // ...and the up-front estimate that decides whether a scan is allowed
+        // to run must agree with what the scanner actually stores.
+        assert_eq!(
+            unknown_candidate_count(&[(start, end)], &ANY_TYPES),
+            out.len() as u64
+        );
+
+        std::hint::black_box(&block);
+    }
+
+    /// The scan stops at the budget instead of storing the whole range — this
+    /// is what stands between an "any type" unknown scan and the OOM killer.
+    #[test]
+    fn unknown_scan_stops_when_the_budget_is_spent() {
+        let block = Box::new([7i64; 8]);
+        let start = &*block as *const i64 as u64;
+        let end = start + std::mem::size_of_val(&*block) as u64;
+
+        let mem = Mem::open(std::process::id() as i32).unwrap();
+        // One byte of budget, and a buffer smaller than the range so the scan
+        // has to come back for a second chunk it never gets to store.
+        let mut buf = vec![0u8; 16];
+        let mut out = Vec::new();
+        let budget = Budget::new(1);
+        scan_unknown_range(&mem, start, end, &ANY_TYPES, &mut buf, &mut out, &budget);
+
+        assert!(budget.spent());
+        assert!(
+            out.len() < (8 * 2) * 3 + 8 * 3,
+            "scan ran to completion despite an exhausted budget"
+        );
+
+        std::hint::black_box(&block);
+    }
+
+    #[test]
+    fn candidate_cap_is_sane() {
+        assert!(candidate_cap() > 0);
     }
 }

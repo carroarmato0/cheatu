@@ -201,8 +201,6 @@ impl Repl {
 
     fn first_scan(&mut self, rest: &str) {
         // Capture selection before borrowing the scanner mutably.
-        let any = self.any;
-        let ty = self.ty;
         let types = self.scan_types();
 
         let Some(scanner) = &mut self.scanner else {
@@ -214,17 +212,30 @@ impl Repl {
             return;
         }
 
-        // Unknown initial value: needs a concrete type.
+        // Unknown initial value. With `type any` this stores every address once
+        // per type, which only fits for modest processes — the engine says so
+        // rather than eating all the memory.
         if rest == "?" || rest.eq_ignore_ascii_case("unknown") {
-            if any {
-                println!("an unknown-value scan needs a concrete type; run e.g. `type i32` first.");
-                return;
-            }
             if scanner.has_scanned() {
                 println!("already scanned; `scan ?` only makes sense as the first scan.");
                 return;
             }
-            match scanner.first_scan(FirstScan::Unknown(ty)) {
+            match scanner.first_scan(FirstScan::Unknown(types)) {
+                Ok(()) => println!("{} matches.", scanner.count()),
+                Err(e) => println!("scan failed: {e}"),
+            }
+            return;
+        }
+
+        // A range, for a value you can only bracket ("gold is a bit over 6.4M").
+        if let Some((low, high)) = cheatu_core::parse_range(rest) {
+            if scanner.has_scanned() {
+                println!(
+                    "a range only works as a first scan; use `next > {low}` then `next < {high}`."
+                );
+                return;
+            }
+            match scanner.first_scan(FirstScan::Range { low, high, types }) {
                 Ok(()) => println!("{} matches.", scanner.count()),
                 Err(e) => println!("scan failed: {e}"),
             }
@@ -442,7 +453,9 @@ commands:
   type [t]             show/set scan type: any i8 u8 i16 u16 i32 u32 i64 u64 f32 f64
                          `any` searches every type at once (use when the type is unknown)
   scan <value>         first scan for a value (narrows if already scanned)
-  scan ?               first scan storing every address (unknown value; needs a concrete type)
+  scan <low>..<high>   first scan for any value in a range, e.g. scan 6400000..6500000
+                         (for a number you can only bracket, not read exactly)
+  scan ?               first scan storing every address (unknown value; works with `type any` too)
   next <op> [value]    narrow results:
                          next 120        value now equals 120
                          next = 120      same as above

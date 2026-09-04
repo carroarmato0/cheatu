@@ -1143,7 +1143,7 @@ impl RpgState {
                             if ui.small_button("−").on_hover_text("remove one").clicked() {
                                 delta = Some((e.id, -1));
                             }
-                            if ui.small_button("＋").on_hover_text("add one").clicked() {
+                            if ui.small_button("+").on_hover_text("add one").clicked() {
                                 delta = Some((e.id, 1));
                             }
                             if ui.button(format!("+{bulk}")).clicked() {
@@ -1355,18 +1355,28 @@ impl CheatuApp {
                     }
                     Job::First(FirstScan::Pattern(pattern))
                 }
-                TypeSel::Any if self.unknown_initial => {
-                    self.status = "Unknown initial value needs a specific type, not “Any”.".into();
-                    self.scanner = Some(scanner);
-                    return;
+                // Aob/Str matched above, so this is "Any" or a single numeric
+                // type; "Any" keeps every address once per type.
+                _ if self.unknown_initial => Job::First(FirstScan::Unknown(self.type_sel.types())),
+                // A range, for a value you can only bracket rather than read
+                // off the screen exactly.
+                _ if cheatu_core::parse_range(self.value_text.trim()).is_some() => {
+                    let (low, high) = cheatu_core::parse_range(self.value_text.trim())
+                        .expect("just checked it parses");
+                    Job::First(FirstScan::Range {
+                        low,
+                        high,
+                        types: self.type_sel.types(),
+                    })
                 }
-                TypeSel::One(t) if self.unknown_initial => Job::First(FirstScan::Unknown(t)),
                 _ if value_is_number => Job::First(FirstScan::Value {
                     value: self.value_text.trim().to_string(),
                     types: self.type_sel.types(),
                 }),
                 _ => {
-                    self.status = "Enter a value to scan for.".into();
+                    self.status =
+                        "Enter a value to scan for, e.g. 100 — or a range, 6400000..6500000."
+                            .into();
                     self.scanner = Some(scanner);
                     return;
                 }
@@ -1602,6 +1612,7 @@ impl eframe::App for CheatuApp {
         let mut do_refresh_procs = false;
         let mut add_to_table: Vec<(u64, ScanType)> = Vec::new();
         let mut remove_from_table: Vec<usize> = Vec::new();
+        let mut clear_table = false;
         // (addr, size) of a candidate to auto-probe.
         let mut do_probe: Option<(u64, usize)> = None;
 
@@ -1682,7 +1693,19 @@ impl eframe::App for CheatuApp {
                 .resizable(true)
                 .default_width(460.0)
                 .show(ctx, |ui| {
-                    ui.heading("Cheat table");
+                    ui.horizontal(|ui| {
+                        ui.heading("Cheat table");
+                        if ui
+                            .add_enabled(
+                                !self.saved.is_empty(),
+                                egui::Button::new("🗑 Clear all").small(),
+                            )
+                            .on_hover_text("Remove every row (unfreezes them too)")
+                            .clicked()
+                        {
+                            clear_table = true;
+                        }
+                    });
                     ui.label(
                         egui::RichText::new(
                             "One row per address. Tick ❄ to freeze; edit Value to set it.",
@@ -1811,23 +1834,39 @@ impl eframe::App for CheatuApp {
                             let hint = match self.type_sel {
                                 TypeSel::Aob => "hex bytes, wildcards as ??, e.g. 48 65 ?? 6C 6F",
                                 TypeSel::Str => "the text you see in-game, e.g. Player1",
-                                _ => "the number you see in-game, e.g. 100",
+                                _ => "e.g. 100, or a range 6400000..6500000",
                             };
-                            ui.add(
+                            // An unknown-value first scan ignores the value —
+                            // but once it has run, this field is the next-scan
+                            // operand again, so only lock it until then.
+                            let needs_value = !self.unknown_initial
+                                || self.scanner.as_ref().is_some_and(|s| s.has_scanned());
+                            ui.add_enabled(
+                                needs_value,
                                 egui::TextEdit::singleline(&mut self.value_text)
                                     .hint_text(hint)
                                     .desired_width(200.0),
+                            )
+                            .on_disabled_hover_text(
+                                "Not used — an unknown-value scan keeps every address.",
+                            )
+                            .on_hover_text(
+                                "The value to search for. If you can only bracket it — gold is \
+                                 somewhere over 6.4M — enter a range like 6400000..6500000 and \
+                                 the first scan keeps everything inside it.",
                             );
-                            // Unknown-initial-value needs a concrete numeric width.
+                            // Unknown-initial-value needs a numeric type — with
+                            // "Any" every address is stored once per type, which
+                            // only fits for modest processes.
                             ui.add_enabled(
-                                matches!(self.type_sel, TypeSel::One(_)),
+                                !matches!(self.type_sel, TypeSel::Aob | TypeSel::Str),
                                 egui::Checkbox::new(
                                     &mut self.unknown_initial,
                                     "Unknown initial value",
                                 ),
                             )
                             .on_disabled_hover_text(
-                                "Pick a specific type to scan for an unknown value.",
+                                "Pick a numeric type to scan for an unknown value.",
                             );
                         });
                         ui.end_row();
@@ -1870,7 +1909,7 @@ impl eframe::App for CheatuApp {
                     let can_undo =
                         !self.scanning && self.scanner.as_ref().is_some_and(|s| s.can_undo());
                     if ui
-                        .add_enabled(can_undo, egui::Button::new("↶ Undo"))
+                        .add_enabled(can_undo, egui::Button::new("↩ Undo"))
                         .on_hover_text("Restore the results from before the last scan")
                         .clicked()
                     {
@@ -1921,7 +1960,7 @@ impl eframe::App for CheatuApp {
                 .striped(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 // Fixed widths (not `auto`) so a constantly-changing float in
-                // "Current" can't reflow the row and make the ＋ button jump.
+                // "Current" can't reflow the row and make the + button jump.
                 // `clip` truncates over-long values instead of widening the cell.
                 .column(Column::exact(150.0))
                 .column(Column::exact(90.0).clip(true))
@@ -1992,14 +2031,16 @@ impl eframe::App for CheatuApp {
                         if show_hints {
                             row.col(|ui| match &d.hint {
                                 Some(h) => {
-                                    // Filled ● for a likely-real value, hollow ○
+                                    // Filled ⚫ for a likely-real value, hollow ⚪
                                     // (weak) otherwise, matching the mockup.
                                     let text = if h.confidence == Confidence::Likely {
-                                        egui::RichText::new(format!("● {}", h.label))
+                                        egui::RichText::new(format!("⚫ {}", h.label))
                                             .small()
                                             .color(egui::Color32::from_rgb(0x4c, 0xaf, 0x50))
                                     } else {
-                                        egui::RichText::new(format!("○ {}", h.label)).small().weak()
+                                        egui::RichText::new(format!("⚪ {}", h.label))
+                                            .small()
+                                            .weak()
                                     };
                                     ui.label(text).on_hover_text(hint_tooltip(h));
                                 }
@@ -2009,11 +2050,7 @@ impl eframe::App for CheatuApp {
                             });
                         }
                         row.col(|ui| {
-                            if ui
-                                .button("＋")
-                                .on_hover_text("Add to cheat table")
-                                .clicked()
-                            {
+                            if ui.button("+").on_hover_text("Add to cheat table").clicked() {
                                 add_to_table.push((d.addr, ty));
                             }
                             if enable_probe {
@@ -2036,7 +2073,7 @@ impl eframe::App for CheatuApp {
                             match probe_results.get(&d.addr) {
                                 Some(ProbeOutcome::Held) => {
                                     ui.label(
-                                        egui::RichText::new("✓ holds")
+                                        egui::RichText::new("✔ holds")
                                             .small()
                                             .color(egui::Color32::from_rgb(0x4c, 0xaf, 0x50)),
                                     )
@@ -2046,7 +2083,7 @@ impl eframe::App for CheatuApp {
                                     );
                                 }
                                 Some(ProbeOutcome::Reverted) => {
-                                    ui.label(egui::RichText::new("✗ reverted").small().weak())
+                                    ui.label(egui::RichText::new("✖ reverted").small().weak())
                                         .on_hover_text(
                                             "The game overwrote the test value — a live copy, \
                                              probably not the source.",
@@ -2372,6 +2409,12 @@ impl eframe::App for CheatuApp {
                 frozen: false,
             });
         }
+        if clear_table {
+            // sync_freezes() runs each frame, so dropping the rows also lifts
+            // their freezes.
+            self.saved.clear();
+            self.status = "Cheat table cleared.".into();
+        }
         // Remove in reverse so indices stay valid.
         remove_from_table.sort_unstable();
         for i in remove_from_table.into_iter().rev() {
@@ -2424,11 +2467,11 @@ fn pick_best_process(procs: &[ProcInfo]) -> Option<i32> {
         .map(|p| p.pid)
 }
 
-/// A borderless, clickable column header that shows a ▼ marker when active.
+/// A borderless, clickable column header that shows a ⬇ marker when active.
 fn sort_header(ui: &mut eframe::egui::Ui, text: &str, active: bool) -> eframe::egui::Response {
     use eframe::egui;
     let label = if active {
-        format!("{text} ▼")
+        format!("{text} ⬇")
     } else {
         text.to_string()
     };
