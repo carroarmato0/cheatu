@@ -554,10 +554,10 @@ commands:
   resolve <expr>       resolve an address expression, e.g. resolve [\"game\"+0x10]+0x8
   save <file>          save the cheat table
   load <file>          load a cheat table (never writes memory; freezes stay off)
-  ptrscan <expr|hex> [depth] [max-offset]
-                       find pointer chains from a module to an address
+  ptrscan <expr> [depth] [max-offset]
+                       find pointer chains from a module to an address (hex needs 0x)
                          (depth 1-8, default 5; max-offset 0x8-0x100000, default 0x1000)
-  ptrscan filter addr <expr|hex>
+  ptrscan filter addr <expr>
                        keep chains that resolve to this address now
   ptrscan filter value <value>
                        keep chains whose target holds this value now (current type)
@@ -680,6 +680,27 @@ mod tests {
         let expr = chain.to_expr().to_string();
         let out = run(&mut repl, "ptrscan list 1000000");
         assert!(out.contains(&expr), "{expr} not in listing");
+    }
+
+    #[test]
+    fn ptrscan_targets_are_expressions_not_bare_hex() {
+        let mut repl = attached();
+        let out = run(&mut repl, "ptrscan 7ff0 1");
+        assert!(out.contains("bad expression"), "{out}");
+        assert!(!out.contains("pointer scan for"), "{out}");
+
+        repl.ptr = Some(cheatu_core::pointer_scan::PtrResults {
+            process: "self".into(),
+            target: 0,
+            settings: Default::default(),
+            chains: Vec::new(),
+            truncated: false,
+        });
+        let out = run(&mut repl, "ptrscan filter addr 7ff0");
+        assert!(out.contains("bad expression"), "{out}");
+        let out = run(&mut repl, "ptrscan filter addr 4096");
+        assert!(out.contains("0 chains remain"), "{out}");
+        assert!(run(&mut repl, "ptrscan").contains("ptrscan <expr> "));
     }
 
     #[test]

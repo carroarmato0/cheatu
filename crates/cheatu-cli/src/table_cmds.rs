@@ -41,7 +41,8 @@ pub fn hex_only(tok: &str) -> Option<Result<u64, String>> {
     Some(u64::from_str_radix(digits, 16).map_err(|_| format!("address {tok} is out of range")))
 }
 
-/// Resolve `tok` (hex digits or an expression) to an address.
+/// Resolve `tok` (hex digits or an expression) to an address. Only for the
+/// legacy `write`; everything else takes an expression (decimal digits).
 pub fn parse_target(src: &dyn MemSource, tok: &str) -> Result<u64, String> {
     if let Some(addr) = hex_only(tok) {
         return addr;
@@ -69,7 +70,9 @@ pub fn add(
     if expr_text.is_empty() {
         return writeln!(out, "usage: add <expr> [type] [description…]");
     }
-    let address = match AddrExpr::parse(expr_text) {
+    // Whatever parses reads back the same; checked anyway so the table can
+    // never hold an entry `save` refuses.
+    let address = match AddrExpr::parse(expr_text).and_then(|a| a.validate().map(|()| a)) {
         Ok(a) => a,
         Err(e) => return writeln!(out, "bad expression: {e}"),
     };

@@ -6,9 +6,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use cheatu_core::pointer_scan::{find_chains, PointerMap, PtrResults, PtrScanSettings};
-use cheatu_core::{LiveSource, ScanProgress, ScanType};
+use cheatu_core::{AddrExpr, LiveSource, MemSource, ScanProgress, ScanType};
 
-use crate::table_cmds::{parse_target, split_expr};
+use crate::table_cmds::split_expr;
 
 const NO_RESULTS: &str =
     "no pointer scan results; run `ptrscan <target>` or `ptrscan load <file>`.";
@@ -35,6 +35,13 @@ pub fn run(
         "filter" => filter(out, ptr, ctx, tail),
         _ => scan(out, ptr, ctx, rest),
     }
+}
+
+/// Resolve a target address expression. Unlike the legacy `write`, bare
+/// digits are decimal: hex needs `0x`.
+fn resolve_target(src: &dyn MemSource, tok: &str) -> Result<u64, String> {
+    let expr = AddrExpr::parse(tok).map_err(|e| format!("bad expression: {e}"))?;
+    expr.resolve(src).map_err(|e| e.to_string())
 }
 
 fn parse_num(s: &str) -> Option<u64> {
@@ -85,7 +92,7 @@ fn scan(
     if target_tok.is_empty() {
         return writeln!(
             out,
-            "usage: ptrscan <expr|hex> [depth] [max-offset] | filter addr <expr|hex> | \
+            "usage: ptrscan <expr> [depth] [max-offset] | filter addr <expr> | \
              filter value <v> | save <file> | load <file> | list [n]"
         );
     }
@@ -105,14 +112,14 @@ fn scan(
         }
     }
     if args.next().is_some() {
-        return writeln!(out, "usage: ptrscan <expr|hex> [depth] [max-offset]");
+        return writeln!(out, "usage: ptrscan <expr> [depth] [max-offset]");
     }
 
     if let Err(e) = src.refresh_regions() {
         return writeln!(out, "could not read the memory map: {e}");
     }
     let src: &LiveSource = src;
-    let target = match parse_target(src, target_tok) {
+    let target = match resolve_target(src, target_tok) {
         Ok(t) => t,
         Err(e) => return writeln!(out, "{e}"),
     };
@@ -178,7 +185,7 @@ fn filter(
     }
     let src: &LiveSource = src;
     let remaining = match kind {
-        "addr" if !arg.is_empty() => match parse_target(src, arg) {
+        "addr" if !arg.is_empty() => match resolve_target(src, arg) {
             Ok(a) => res.filter_by_address(src, a),
             Err(e) => return writeln!(out, "{e}"),
         },
@@ -186,12 +193,7 @@ fn filter(
             Some(v) => res.filter_by_value(src, ctx.ty, &v),
             None => return writeln!(out, "could not parse {arg:?} as {}.", ctx.ty),
         },
-        _ => {
-            return writeln!(
-                out,
-                "usage: ptrscan filter addr <expr|hex> | filter value <v>"
-            )
-        }
+        _ => return writeln!(out, "usage: ptrscan filter addr <expr> | filter value <v>"),
     };
     writeln!(out, "{remaining} chains remain.")
 }
