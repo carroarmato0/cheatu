@@ -161,17 +161,22 @@ fn aob_matches_at(hay: &[u8], pat: &[Option<u8>]) -> bool {
     hay.iter().zip(pat).all(|(h, p)| p.is_none_or(|b| b == *h))
 }
 
-fn resolve_aob(
-    pattern: &str,
-    module: Option<&str>,
+/// Start addresses of up to `limit` matches of `pat` in the readable regions
+/// (only the named module's, when given). Unreadable chunks are skipped.
+pub(crate) fn find_matches(
     src: &dyn MemSource,
-) -> Result<u64, ResolveError> {
-    let pat = parse_aob(pattern).ok_or_else(|| ResolveError::BadPattern(pattern.to_string()))?;
+    pat: &[Option<u8>],
+    module: Option<&str>,
+    limit: usize,
+) -> Result<Vec<u64>, ResolveError> {
     if let Some(m) = module {
         module_base(src.regions(), m)?;
     }
-    let overlap = pat.len() - 1;
     let mut found: Vec<u64> = Vec::new();
+    if pat.is_empty() || limit == 0 {
+        return Ok(found);
+    }
+    let overlap = pat.len() - 1;
     let mut buf = vec![0u8; AOB_CHUNK + overlap];
     'regions: for r in src.regions() {
         if !r.read || module.is_some_and(|m| module_name(r) != Some(m)) {
@@ -189,9 +194,9 @@ fn resolve_aob(
                 if hay.len() >= pat.len() {
                     let last = (hay.len() - pat.len()).min(step - 1);
                     for i in 0..=last {
-                        if aob_matches_at(&hay[i..], &pat) {
+                        if aob_matches_at(&hay[i..], pat) {
                             found.push(start + i as u64);
-                            if found.len() >= AOB_MAX_MATCHES {
+                            if found.len() >= limit {
                                 break 'regions;
                             }
                         }
@@ -201,6 +206,26 @@ fn resolve_aob(
             start += step as u64;
         }
     }
+    Ok(found)
+}
+
+/// Number of matches of `pat`, counting at most `limit`.
+pub(crate) fn count_matches(
+    src: &dyn MemSource,
+    pat: &[Option<u8>],
+    module: Option<&str>,
+    limit: usize,
+) -> Result<usize, ResolveError> {
+    Ok(find_matches(src, pat, module, limit)?.len())
+}
+
+fn resolve_aob(
+    pattern: &str,
+    module: Option<&str>,
+    src: &dyn MemSource,
+) -> Result<u64, ResolveError> {
+    let pat = parse_aob(pattern).ok_or_else(|| ResolveError::BadPattern(pattern.to_string()))?;
+    let found = find_matches(src, &pat, module, AOB_MAX_MATCHES)?;
     match found.as_slice() {
         [one] => Ok(*one),
         _ => Err(ResolveError::AobCount {
