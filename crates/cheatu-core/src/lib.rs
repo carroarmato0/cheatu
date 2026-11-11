@@ -6,6 +6,7 @@
 //!   * read and write another process's memory ([`mem`])
 //!   * represent typed scan values ([`value`])
 //!   * run first/next scans and keep candidate addresses ([`scan`])
+//!   * build a disk-backed pointer map for pointer scans ([`pointer_scan`])
 //!   * check for / request elevated privileges ([`privilege`])
 //!
 //! On Linux, reading another process's memory requires either running as root
@@ -16,6 +17,7 @@
 pub mod addr_expr;
 pub mod maps;
 pub mod mem;
+pub mod pointer_scan;
 pub mod privilege;
 pub mod process;
 pub mod scan;

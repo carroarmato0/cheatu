@@ -247,31 +247,31 @@ impl ScanProgress {
         (total > 0).then(|| self.done.load(Ordering::Relaxed).min(total) as f32 / total as f32)
     }
 
-    fn cancelled(&self) -> bool {
+    pub(crate) fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
 
     /// Read the cancel flag and clear it, so a cancelled scan doesn't also kill
     /// the next one.
-    fn take_cancel(&self) -> bool {
+    pub(crate) fn take_cancel(&self) -> bool {
         self.cancel.swap(false, Ordering::Relaxed)
     }
 
     /// Start a run of `total` work units. The cancel flag is deliberately left
     /// alone: a cancel that arrives just before the scan starts should still
     /// stop it.
-    fn begin(&self, total: usize) {
+    pub(crate) fn begin(&self, total: usize) {
         self.done.store(0, Ordering::Relaxed);
         self.total.store(total, Ordering::Relaxed);
     }
 
-    fn advance(&self, n: usize) {
+    pub(crate) fn advance(&self, n: usize) {
         self.done.fetch_add(n, Ordering::Relaxed);
     }
 }
 
 /// The error a scan returns once [`ScanProgress::cancel`] has been called.
-fn cancelled_err() -> io::Error {
+pub(crate) fn cancelled_err() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "scan cancelled")
 }
 

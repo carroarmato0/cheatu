@@ -681,6 +681,7 @@ version = "1.1.0"
 dependencies = [
  "libc",
  "mach2",
+ "memmap2",
  "proptest",
  "serde",
  "toml",

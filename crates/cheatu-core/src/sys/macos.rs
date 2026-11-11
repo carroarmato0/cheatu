@@ -245,16 +245,80 @@ pub(crate) fn read_maps(pid: i32) -> io::Result<Vec<MemoryRegion>> {
     Ok(regions)
 }
 
+/// `PROC_PIDREGIONPATHINFO` from `<sys/proc_info.h>`.
+const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+
+/// `struct proc_regioninfo` from `<sys/proc_info.h>` (libc lacks it).
+#[repr(C)]
+struct ProcRegionInfo {
+    pri_protection: u32,
+    pri_max_protection: u32,
+    pri_inheritance: u32,
+    pri_flags: u32,
+    pri_offset: u64,
+    pri_behavior: u32,
+    pri_user_wired_count: u32,
+    pri_user_tag: u32,
+    pri_pages_resident: u32,
+    pri_pages_shared_now_private: u32,
+    pri_pages_swapped_out: u32,
+    pri_pages_dirtied: u32,
+    pri_ref_count: u32,
+    pri_shadow_depth: u32,
+    pri_share_mode: u32,
+    pri_private_pages_resident: u32,
+    pri_shared_pages_resident: u32,
+    pri_obj_id: u32,
+    pri_depth: u32,
+    pri_address: u64,
+    pri_size: u64,
+}
+
+const _: () = assert!(std::mem::size_of::<ProcRegionInfo>() == 96);
+
+/// `struct proc_regionwithpathinfo` from `<sys/proc_info.h>`.
+#[repr(C)]
+struct ProcRegionWithPathInfo {
+    prp_prinfo: ProcRegionInfo,
+    prp_vip: libc::vnode_info_path,
+}
+
 /// The backing file of a region, or a Linux-style pseudo-name (`[heap]`,
 /// `[stack]`) derived from the anonymous region's tag so `RegionKind` works
 /// unchanged.
+///
+/// The kernel answers for the first region at *or after* `addr`, so an
+/// anonymous region just below a mapped file would otherwise be reported as
+/// that file (and count as a module image). `proc_regionfilename` hides the
+/// region bounds, hence the direct `proc_pidinfo` call.
 fn region_path(pid: i32, addr: u64, user_tag: u32) -> String {
-    let mut buf = [0u8; libc::PATH_MAX as usize];
-    // SAFETY: buf is PATH_MAX bytes; the call writes at most that many.
-    let n =
-        unsafe { libc::proc_regionfilename(pid, addr, buf.as_mut_ptr().cast(), buf.len() as u32) };
-    if n > 0 {
-        return String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+    // SAFETY: plain-old-data struct; all-zero is a valid value.
+    let mut info: ProcRegionWithPathInfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<ProcRegionWithPathInfo>() as libc::c_int;
+    // SAFETY: info is `size` bytes and the flavor fills exactly this struct.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDREGIONPATHINFO,
+            addr,
+            (&mut info as *mut ProcRegionWithPathInfo).cast(),
+            size,
+        )
+    };
+    let r = &info.prp_prinfo;
+    if n == size && r.pri_address <= addr && addr - r.pri_address < r.pri_size {
+        // SAFETY: vip_path is MAXPATHLEN c_chars, NUL-terminated by the kernel
+        // (and zero-initialised above).
+        let raw: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                info.prp_vip.vip_path.as_ptr().cast(),
+                std::mem::size_of_val(&info.prp_vip.vip_path),
+            )
+        };
+        let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        if len > 0 {
+            return String::from_utf8_lossy(&raw[..len]).into_owned();
+        }
     }
     match user_tag {
         VM_MEMORY_MALLOC_FIRST..=VM_MEMORY_MALLOC_LAST => "[heap]".into(),

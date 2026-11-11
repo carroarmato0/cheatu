@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 libc.workspace = true
+memmap2 = "0.9"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
 
