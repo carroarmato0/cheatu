@@ -74,10 +74,6 @@ enum DialogPurpose {
     SaveTable,
 }
 
-/// A background `aob(...)` resolve: entry id, the expression it resolved,
-/// the address a write had failed at (if that triggered it), the result.
-type AobResult = (u64, AddrExpr, Option<u64>, Result<u64, String>);
-
 /// Cap on how many candidate rows we render at once (the table is virtualized,
 /// but building the snapshot for millions of hits would still be wasteful).
 const MAX_DISPLAY: usize = 2000;
@@ -1363,7 +1359,12 @@ struct CheatuApp {
     /// When `live`'s memory map was last re-read.
     live_refreshed: Option<Instant>,
     /// The one `aob(...)` resolve running in the background.
-    aob_pending: Option<Receiver<AobResult>>,
+    aob_pending: Option<Receiver<cheat_table::BgResolve>>,
+    /// Bumped on attach and on every expression edit; a background resolve
+    /// started under an older generation is dropped when it comes back.
+    resolve_generation: u64,
+    /// Why `live` could not be opened for the attached process.
+    live_error: Option<String>,
     /// File the table was last opened from or saved to.
     table_path: Option<PathBuf>,
     /// `process` of the opened table, saved again when nothing is attached.
@@ -1409,8 +1410,21 @@ impl CheatuApp {
                 self.display.clear();
                 self.result_count = 0;
                 self.status = format!("Attached to pid {pid}.");
-                self.live = LiveSource::open(pid).ok();
+                match LiveSource::open(pid) {
+                    Ok(live) => {
+                        self.live = Some(live);
+                        self.live_error = None;
+                    }
+                    Err(e) => {
+                        let why = format!("cannot read the process for address expressions: {e}");
+                        self.status = format!("Attached to pid {pid}, but {why}.");
+                        self.live = None;
+                        self.live_error = Some(why);
+                    }
+                }
                 self.live_refreshed = Some(Instant::now());
+                // Any background resolve still running read the old process.
+                self.resolve_generation += 1;
                 // Addresses of the previous process mean nothing here; drop
                 // them so nothing is written before the entries re-resolve.
                 for e in &mut self.saved {
@@ -1868,16 +1882,18 @@ impl CheatuApp {
         // A finished background AoB resolve.
         if let Some(rx) = &self.aob_pending {
             match rx.try_recv() {
-                Ok((id, expr, failed_at, r)) => {
+                Ok(r) => {
                     self.aob_pending = None;
-                    // Dropped if the row was removed or its expression edited.
-                    if let Some(e) = self
-                        .saved
-                        .iter_mut()
-                        .find(|e| e.id == id && e.entry.address == expr)
-                    {
-                        cheat_table::apply_resolve(e, r, now, failed_at);
-                    }
+                    // Dropped if it read another process, the row was removed
+                    // or an expression was edited since it started.
+                    let pid = self.attached.as_ref().map(|(p, _)| *p).unwrap_or(0);
+                    cheat_table::apply_background_result(
+                        &mut self.saved,
+                        pid,
+                        self.resolve_generation,
+                        r,
+                        now,
+                    );
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.aob_pending = None,
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -1937,13 +1953,21 @@ impl CheatuApp {
                 e.needs_resolve = false;
                 e.write_failed = false;
                 let (id, expr) = (e.id, e.entry.address.clone());
+                let generation = self.resolve_generation;
                 let (tx, rx) = mpsc::channel();
                 self.aob_pending = Some(rx);
                 std::thread::spawn(move || {
-                    let r = LiveSource::open(pid)
+                    let result = LiveSource::open(pid)
                         .map_err(|err| format!("cannot read process: {err}"))
                         .and_then(|src| expr.resolve(&src).map_err(|err| err.to_string()));
-                    let _ = tx.send((id, expr, failed_at, r));
+                    let _ = tx.send(cheat_table::BgResolve {
+                        id,
+                        expr,
+                        pid,
+                        generation,
+                        failed_at,
+                        result,
+                    });
                 });
             }
         }
@@ -2110,6 +2134,8 @@ impl eframe::App for CheatuApp {
         let mut remove_from_table: Vec<usize> = Vec::new();
         let mut clear_table = false;
         let mut open_dialog: Option<DialogPurpose> = None;
+        // An address expression was changed this frame.
+        let mut expr_edited = false;
         let mut quick_save = false;
         // Index of the cheat table row whose value should be written once.
         let mut do_set: Option<usize> = None;
@@ -2320,6 +2346,7 @@ impl eframe::App for CheatuApp {
 
                     let attached = self.attached.is_some();
                     let aob_busy = self.aob_pending.is_some();
+                    let live_error = self.live_error.as_deref();
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -2421,12 +2448,17 @@ impl eframe::App for CheatuApp {
                                                 entry.entry.address = expr;
                                                 entry.resolved = Err("not resolved yet".into());
                                                 entry.needs_resolve = true;
+                                                expr_edited = true;
                                             }
                                         }
                                     }
                                     if !attached {
                                         ui.label(
                                             egui::RichText::new("not attached").weak().small(),
+                                        );
+                                    } else if let Some(why) = live_error {
+                                        ui.label(
+                                            egui::RichText::new(why).small().color(err_color(ui)),
                                         );
                                     } else {
                                         match &entry.resolved {
@@ -3203,6 +3235,12 @@ impl eframe::App for CheatuApp {
             self.theme = theme;
             apply_theme(ctx, theme);
             save_theme(theme);
+        }
+
+        // A search started before the edit must not land on the new
+        // expression (or on an A -> B -> A edit's lost re-resolve).
+        if expr_edited {
+            self.resolve_generation += 1;
         }
 
         // ---- Cheat table file dialog and attach offer --------------------

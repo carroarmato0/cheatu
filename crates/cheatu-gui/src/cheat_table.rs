@@ -127,6 +127,45 @@ pub fn apply_resolve(
     e.needs_resolve = false;
 }
 
+/// The result of a background (`aob(...)`) resolve, with what it was
+/// started for.
+pub struct BgResolve {
+    /// The row it was started for.
+    pub id: u64,
+    /// The expression it resolved.
+    pub expr: AddrExpr,
+    /// The process it read.
+    pub pid: i32,
+    /// The app's resolve generation when it started; bumped on attach and on
+    /// every expression edit.
+    pub generation: u64,
+    /// The address a write had failed at, if that triggered it.
+    pub failed_at: Option<u64>,
+    pub result: Result<u64, String>,
+}
+
+/// Apply a finished background resolve to its row, if it still belongs
+/// there: same process, same generation, same expression. A stale result is
+/// dropped and its row is asked to resolve again (it was taken off the queue
+/// when the search started). Returns whether the result was applied.
+pub fn apply_background_result(
+    entries: &mut [GuiEntry],
+    pid: i32,
+    generation: u64,
+    r: BgResolve,
+    now: Instant,
+) -> bool {
+    let Some(e) = entries.iter_mut().find(|e| e.id == r.id) else {
+        return false;
+    };
+    if r.pid != pid || r.generation != generation || r.expr != e.entry.address {
+        e.needs_resolve = true;
+        return false;
+    }
+    apply_resolve(e, r.result, now, r.failed_at);
+    true
+}
+
 /// A new entry for a scan result: `"module"+offset` when the address is in a
 /// module's image, else the plain address. The value is a zero of the type;
 /// the caller fills in the live value when it can read it.
@@ -429,5 +468,71 @@ frozen = true
         // A plain resolve is stored as is.
         apply_resolve(&mut e, Err("boom".into()), later, None);
         assert_eq!(e.resolved, Err("boom".into()));
+    }
+    fn bg(e: &GuiEntry, pid: i32, generation: u64, result: Result<u64, String>) -> BgResolve {
+        BgResolve {
+            id: e.id,
+            expr: e.entry.address.clone(),
+            pid,
+            generation,
+            failed_at: None,
+            result,
+        }
+    }
+
+    #[test]
+    fn matching_background_result_is_applied() {
+        let now = Instant::now();
+        let mut v = vec![entry("aob(\"48 8B\")", true)];
+        let r = bg(&v[0], 7, 3, Ok(0x4000));
+        assert!(apply_background_result(&mut v, 7, 3, r, now));
+        assert_eq!(v[0].resolved, Ok(0x4000));
+        assert!(!v[0].needs_resolve);
+    }
+
+    #[test]
+    fn background_result_from_older_generation_is_ignored() {
+        let now = Instant::now();
+        let mut v = vec![entry("aob(\"48 8B\")", true)];
+        v[0].resolved = Err("not resolved yet".into());
+        // Started before a re-attach (generation 3, old pid 7).
+        let r = bg(&v[0], 7, 3, Ok(0x4000));
+        assert!(!apply_background_result(&mut v, 9, 4, r, now));
+        assert_eq!(v[0].resolved, Err("not resolved yet".into()));
+        assert!(
+            v[0].needs_resolve,
+            "must be searched again in the new process"
+        );
+        assert!(freeze_items(&v).is_empty());
+
+        // Same generation but another process is just as stale.
+        let r = bg(&v[0], 7, 4, Ok(0x4000));
+        assert!(!apply_background_result(&mut v, 9, 4, r, now));
+        assert!(v[0].resolved.is_err());
+    }
+
+    #[test]
+    fn background_result_for_deleted_row_is_ignored() {
+        let now = Instant::now();
+        let gone = entry("aob(\"48 8B\")", true);
+        let mut v = vec![entry("aob(\"48 8B\")", true)];
+        v[0].resolved = Err("x".into());
+        let r = bg(&gone, 7, 3, Ok(0x4000));
+        assert!(!apply_background_result(&mut v, 7, 3, r, now));
+        assert_eq!(v[0].resolved, Err("x".into()));
+    }
+
+    #[test]
+    fn background_result_after_edit_back_and_forth_is_ignored() {
+        let now = Instant::now();
+        let mut v = vec![entry("aob(\"48 8B\")", true)];
+        // Search for A started at generation 3...
+        let r = bg(&v[0], 7, 3, Ok(0x4000));
+        // ...then the row was edited A -> B -> A, bumping the generation and
+        // asking for a fresh resolve.
+        v[0].needs_resolve = true;
+        assert!(!apply_background_result(&mut v, 7, 5, r, now));
+        assert!(v[0].needs_resolve, "the requested re-resolve is kept");
+        assert!(v[0].resolved.is_err());
     }
 }
