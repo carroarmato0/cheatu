@@ -156,9 +156,15 @@ someone else.
   name, you get a warning but the table still opens.
 - A table that fails to load (invalid TOML, unknown type, a value that does
   not fit its type, an unknown `version`, a file over 1 MiB or with more than
-  10 000 entries) is refused as a whole, with the line number in the status
-  bar; the current table is left untouched. Saving writes a temporary file and
-  renames it, so a failed save never damages an existing table.
+  10 000 entries, or not a regular file) is refused as a whole, with the line
+  number in the status bar; the current table is left untouched. A file with a
+  newer `version` is reported as such, even when it has keys this version does
+  not know.
+- Saving writes a new temporary file (readable only by you, mode 0600) next to
+  the table and renames it over the table, so a failed save never damages an
+  existing table. A row whose address could not be read back (a built
+  expression over the limits below, or a module name containing `"`) is
+  refused with its number and description, and nothing is written.
 
 The CLI has the same commands: `save <file>`, `load <file>` (freezes stay off),
 `add <expr> [type] [description…]`, `entries` and `resolve <expr>`.
@@ -219,8 +225,10 @@ Open it from a cheat table row: **…** → **Pointer scan…**.
   8 [5]; **Max offset** per step, 0x8 to 0x100000 [0x1000]; **Alignment** of
   pointers, 1, 2, 4 or 8 [8]; **Result cap**, 1 to 10 000 000 [1 000 000].
 - **Scan** first takes a snapshot of every pointer in the game's writable
-  memory (the *pointer map*, stored and sorted in a temporary file on disk, so
-  memory use stays bounded), then searches it backwards from the target. With
+  memory (the *pointer map*, stored and sorted in a private temporary folder
+  on disk — `/var/tmp` on Linux, since `/tmp` is often kept in RAM — so
+  memory use stays bounded), then searches it backwards from the target.
+  Folders left behind by a crashed cheatu are cleaned up by the next scan. With
   **Pause target while scanning** on, the game is paused only while its memory
   is read. Progress is shown, and **Cancel** stops it. For a game using 5 GiB
   of memory, reading took about 14 s and the map needs about 0.6 GiB of
@@ -241,12 +249,18 @@ chains, and most of them only work by accident. To keep the robust ones:
 4. Repeat steps 2–3 until a few chains remain, then add one to the table.
 
 **Results files are treated as untrusted**, since they are meant to be shared:
-**Open results…** checks every length and index and refuses a malformed file.
-The settings stored in a file are only shown, never used for a new scan.
+**Open results…** checks every length and index and refuses a malformed file,
+one over 1 GiB, a chain deeper than 32 steps, or a module name that is empty,
+longer than 255 bytes, or contains `"` or control characters — so every chain
+it accepts can be added to a table and saved. The settings stored in a file
+are only shown, never used for a new scan. Saving results writes a temporary
+file and renames it, so a failed save never destroys earlier results.
 
-CLI: `ptrscan <expr|hex> [depth] [max-offset]`, `ptrscan filter addr
-<expr|hex>`, `ptrscan filter value <value>`, `ptrscan save <file>`,
-`ptrscan load <file>` and `ptrscan list [n]`.
+CLI: `ptrscan <expr> [depth] [max-offset]`, `ptrscan filter addr <expr>`,
+`ptrscan filter value <value>`, `ptrscan save <file>`, `ptrscan load <file>`
+and `ptrscan list [n]`. The target is an
+[address expression](#address-expressions), so hex needs `0x` (`1000` is
+decimal); only the older `write` command still reads bare digits as hex.
 
 ## Cheat wizard
 
@@ -278,7 +292,14 @@ beginning (it is unavailable while a step is working).
    most 3 chains are left, or you stop and keep the best one.
 4. **Save.** Give the cheat a name and a value, and choose whether it stays
    frozen at that value or is only saved (use **Set** later). It is added to the
-   cheat table, which you can then save and share.
+   cheat table, which you can then save and share. If the main window is
+   attached to a different process than the wizard by then, the cheat is added
+   unfrozen, with a warning in the status bar, so nothing is written into the
+   wrong process.
+
+Closing the wizard (or cheatu) stops what it is doing and puts back a test
+value that is still in the game, even while it is in the middle of writing
+test values.
 
 When the value cannot be found, no candidate survives, or no chain survives a
 restart, the wizard says so and offers to start over or — once an address was
