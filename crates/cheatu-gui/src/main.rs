@@ -9,6 +9,9 @@
 mod cheat_table;
 mod file_dialog;
 mod pointer_window;
+// Task 12 builds the egui window and the real backend on top of this.
+#[allow(dead_code)]
+mod wizard;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
