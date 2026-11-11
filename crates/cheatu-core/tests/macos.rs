@@ -109,3 +109,25 @@ fn open_nonexistent_pid_errors() {
     let err = Mem::open(i32::MAX).err().expect("no such process");
     assert_ne!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
 }
+
+#[test]
+fn process_list_contains_self() {
+    let me = cheatu_core::list_processes()
+        .into_iter()
+        .find(|p| p.pid == own_pid())
+        .expect("self listed");
+    assert!(!me.name.is_empty());
+    assert!(me.cmdline.contains("macos"), "cmdline: {}", me.cmdline);
+    assert!(me.rss_bytes > 0);
+    assert!(me.accessible);
+    assert!(!me.is_wine);
+}
+
+#[test]
+fn process_list_is_sorted_by_pid() {
+    let procs = cheatu_core::list_processes();
+    assert!(procs.len() > 5, "expected several processes");
+    for w in procs.windows(2) {
+        assert!(w[0].pid < w[1].pid);
+    }
+}

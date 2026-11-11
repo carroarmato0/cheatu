@@ -273,14 +273,138 @@ fn page_size() -> u64 {
     }
 }
 
-// Replaced in task 3.
+/// All processes libproc reports, unsorted. Processes with neither readable
+/// arguments nor an executable path (e.g. `kernel_task`) are skipped.
 pub(crate) fn raw_processes() -> Vec<RawProc> {
-    Vec::new()
+    // SAFETY: a null buffer asks for the current number of pids.
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    // Headroom for processes started between the two calls.
+    let mut pids = vec![0i32; n as usize + 64];
+    // SAFETY: the buffer holds pids.len() i32s.
+    let n = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr().cast(),
+            (pids.len() * std::mem::size_of::<i32>()) as i32,
+        )
+    };
+    pids.truncate(n.max(0) as usize);
+
+    pids.into_iter()
+        .filter(|&pid| pid > 0)
+        .filter_map(|pid| {
+            let cmdline = match procargs(pid) {
+                Some((argv, _)) if !argv.is_empty() => argv.join(" "),
+                _ => pid_path(pid)?,
+            };
+            Some(RawProc {
+                pid,
+                name: pid_name(pid),
+                cmdline,
+                rss_bytes: resident_size(pid),
+            })
+        })
+        .collect()
 }
 
-// Replaced in task 3.
-pub(crate) fn environ(_pid: i32) -> Option<Vec<String>> {
-    None
+/// The `KEY=VALUE` environment of `pid`, from `KERN_PROCARGS2`. Readable for
+/// our own processes (or as root).
+pub(crate) fn environ(pid: i32) -> Option<Vec<String>> {
+    procargs(pid).map(|(_, env)| env)
+}
+
+/// argv and environment of `pid`, parsed from the `KERN_PROCARGS2` sysctl:
+/// `argc: i32`, the exec path, NUL padding, `argc` NUL-terminated arguments,
+/// then NUL-terminated `KEY=VALUE` strings up to an empty one.
+fn procargs(pid: i32) -> Option<(Vec<String>, Vec<String>)> {
+    let mut argmax: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: argmax/len describe a c_int out-buffer.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            &mut argmax as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || argmax <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; argmax as usize];
+    let mut len = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    // SAFETY: buf/len describe the out-buffer.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len < 4 {
+        return None;
+    }
+    buf.truncate(len);
+    let argc = i32::from_ne_bytes(buf[..4].try_into().ok()?).max(0) as usize;
+
+    let mut fields = buf[4..].split(|&b| b == 0);
+    fields.next()?; // exec path
+    let mut fields = fields.skip_while(|f| f.is_empty()); // padding
+    let argv: Vec<String> = fields
+        .by_ref()
+        .take(argc)
+        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .collect();
+    let env = fields
+        .take_while(|f| !f.is_empty())
+        .map(|f| String::from_utf8_lossy(f).into_owned())
+        .collect();
+    Some((argv, env))
+}
+
+fn pid_name(pid: i32) -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: buf is 256 bytes; the call writes at most that many.
+    let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    String::from_utf8_lossy(&buf[..n.max(0) as usize]).into_owned()
+}
+
+fn pid_path(pid: i32) -> Option<String> {
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: buf is PROC_PIDPATHINFO_MAXSIZE bytes.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+/// Resident memory in bytes, best-effort 0.
+fn resident_size(pid: i32) -> u64 {
+    // SAFETY: proc_taskinfo is plain old data.
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+    // SAFETY: info is `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if n == size {
+        info.pti_resident_size
+    } else {
+        0
+    }
 }
 
 /// Free + inactive physical memory, falling back to half of installed RAM.
@@ -325,4 +449,15 @@ pub(crate) fn elevation_available() -> bool {
 // Replaced in task 4.
 pub(crate) fn relaunch_elevated(_exe: &Path, _args: &[String]) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, "elevation not implemented yet")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environ_of_self_contains_path() {
+        let env = environ(std::process::id() as i32).expect("own environment readable");
+        assert!(env.iter().any(|kv| kv.starts_with("PATH=")), "{env:?}");
+    }
 }
