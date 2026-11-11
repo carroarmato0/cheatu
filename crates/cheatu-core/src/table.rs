@@ -2,15 +2,17 @@
 //! type, a value and a frozen flag. Reading and writing only, no UI logic.
 //!
 //! Every problem fails the whole load with the offending line, so a broken
-//! table is never half-loaded. Saves go to a temporary file that is renamed
-//! over the target, so a failed save never corrupts an existing table.
+//! table is never half-loaded. Only regular files are read. Saves go to a new
+//! temporary file that is renamed over the target, so a failed save never
+//! corrupts an existing table, and an entry whose address would not load back
+//! is refused before anything is written.
 
 use crate::addr_expr::AddrExpr;
+use crate::file_io::{atomic_write, open_regular};
 use crate::value::ScanType;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use toml::Spanned;
 
@@ -88,11 +90,23 @@ pub fn load(path: &Path) -> Result<CheatTable, TableError> {
         line: None,
         message: format!("{}: {e}", path.display()),
     };
-    let len = std::fs::metadata(path).map_err(io_err)?.len();
+    let file = open_regular(path).map_err(io_err)?;
+    let len = file.metadata().map_err(io_err)?.len();
     if len > MAX_FILE_BYTES {
         return Err(too_large(len));
     }
-    let text = std::fs::read_to_string(path).map_err(io_err)?;
+    // `take` also bounds a file that grows while it is read.
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_err)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large(bytes.len() as u64));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| TableError {
+        line: None,
+        message: format!("{}: file is not valid UTF-8", path.display()),
+    })?;
     parse(&text)
 }
 
@@ -118,6 +132,19 @@ pub fn parse(text: &str) -> Result<CheatTable, TableError> {
     if text.len() as u64 > MAX_FILE_BYTES {
         return Err(too_large(text.len() as u64));
     }
+    // The version decides which keys are valid, so check it before the
+    // strict parse: a newer file says "unsupported version", not "unknown key".
+    #[derive(Deserialize)]
+    struct VersionOnly {
+        version: Option<Spanned<i64>>,
+    }
+    if let Ok(VersionOnly {
+        version: Some(version),
+    }) = toml::from_str::<VersionOnly>(text)
+    {
+        check_version(text, &version)?;
+    }
+
     let raw: RawTable = toml::from_str(text).map_err(|e| TableError {
         line: e.span().map(|s| line_of(text, s.start)),
         message: e.message().to_string(),
@@ -127,12 +154,7 @@ pub fn parse(text: &str) -> Result<CheatTable, TableError> {
         line: None,
         message: "missing required key `version`".into(),
     })?;
-    if *version.get_ref() != FORMAT_VERSION {
-        return Err(TableError {
-            line: Some(line_of(text, version.span().start)),
-            message: format!("unsupported version {}", version.get_ref()),
-        });
-    }
+    check_version(text, &version)?;
     if raw.entries.len() > MAX_ENTRIES {
         return Err(TableError {
             line: None,
@@ -157,6 +179,16 @@ pub fn parse(text: &str) -> Result<CheatTable, TableError> {
         process: raw.process,
         entries,
     })
+}
+
+fn check_version(text: &str, version: &Spanned<i64>) -> Result<(), TableError> {
+    if *version.get_ref() != FORMAT_VERSION {
+        return Err(TableError {
+            line: Some(line_of(text, version.span().start)),
+            message: format!("unsupported version {}", version.get_ref()),
+        });
+    }
+    Ok(())
 }
 
 fn check_entry(raw: RawEntry) -> Result<TableEntry, String> {
@@ -205,7 +237,21 @@ fn hex_len(s: &str) -> Option<usize> {
 }
 
 /// Serialize a table. Always writes `ScanType::label` for the type.
-pub fn to_toml(table: &CheatTable) -> String {
+///
+/// Refuses (naming the 1-based entry and its description) an entry whose
+/// address would not load back, e.g. a built expression nested too deeply or
+/// naming a module with a `"` (see [`AddrExpr::validate`]).
+pub fn to_toml(table: &CheatTable) -> Result<String, TableError> {
+    for (i, e) in table.entries.iter().enumerate() {
+        e.address.validate().map_err(|err| TableError {
+            line: None,
+            message: format!(
+                "entry {} ({:?}): address cannot be saved: {err}",
+                i + 1,
+                e.description
+            ),
+        })?;
+    }
     #[derive(Serialize)]
     struct Out<'a> {
         version: i64,
@@ -229,22 +275,14 @@ pub fn to_toml(table: &CheatTable) -> String {
             })
             .collect(),
     };
-    toml::to_string(&out).expect("a cheat table always serializes")
+    Ok(toml::to_string(&out).expect("a cheat table always serializes"))
 }
 
-/// Save a table by writing `<path>.tmp-<pid>` and renaming it over `path`.
+/// Save a table: refuse entries that would not load back (see [`to_toml`],
+/// [`io::ErrorKind::InvalidInput`]), then write a new temporary file in the
+/// same directory and rename it over `path`.
 pub fn save(table: &CheatTable, path: &Path) -> io::Result<()> {
-    let mut tmp = OsString::from(path.as_os_str());
-    tmp.push(format!(".tmp-{}", std::process::id()));
-    let tmp = std::path::PathBuf::from(tmp);
-    let result = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(to_toml(table).as_bytes())?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    let text =
+        to_toml(table).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.message))?;
+    atomic_write(path, text.as_bytes())
 }

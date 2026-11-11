@@ -10,17 +10,22 @@
 //!
 //! The header holds `process`, `target`, `settings`, `modules` and
 //! `truncated`. Result files are meant to be shared, so loading treats them as
-//! untrusted: every length and index is checked before use and anything
-//! malformed is [`io::ErrorKind::InvalidData`].
+//! untrusted: only a regular file of at most [`MAX_FILE_BYTES`] is read, every
+//! length and index is checked before use, module names must be valid (see
+//! [`valid_module_name`]) and chains at most [`MAX_CHAIN_DEPTH`] deep, so every
+//! chain makes an expression that a table can save and load. Anything
+//! malformed is [`io::ErrorKind::InvalidData`]. Saves write a temp file and
+//! rename it over the target, so a failed save never destroys earlier results.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use super::{PointerChain, PtrScanSettings};
+use crate::addr_expr::valid_module_name;
+use crate::file_io::{atomic_write, open_regular, too_large};
 use crate::source::MemSource;
 use crate::value::{ScanType, ScanValue};
 
@@ -28,6 +33,11 @@ const MAGIC: &[u8; 9] = b"CHEATUPTR";
 const VERSION: u32 = 1;
 /// Largest accepted JSON header.
 const MAX_HEADER: u32 = 1024 * 1024;
+/// Largest accepted results file.
+pub const MAX_FILE_BYTES: u64 = 1 << 30;
+/// Deepest chain a results file may hold. Even with 255-byte module names and
+/// `u64::MAX` offsets, such a chain fits the expression length limit.
+pub const MAX_CHAIN_DEPTH: usize = 32;
 
 /// The chains found by a pointer scan, with what is needed to reuse them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,7 +127,13 @@ impl PtrResults {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "header too large"))?;
 
         // Refuse what `load` would reject, before touching the file.
-        let max_depth = self.settings.max_depth.min(u8::MAX as usize);
+        if let Some(m) = self.chains.iter().find(|c| !valid_module_name(&c.module)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid module name {:?}", m.module),
+            ));
+        }
+        let max_depth = self.settings.max_depth.min(MAX_CHAIN_DEPTH);
         if let Some(c) = self
             .chains
             .iter()
@@ -132,26 +148,37 @@ impl PtrResults {
             ));
         }
 
-        let mut w = BufWriter::new(File::create(path)?);
-        w.write_all(MAGIC)?;
-        w.write_all(&VERSION.to_le_bytes())?;
-        w.write_all(&header_len.to_le_bytes())?;
-        w.write_all(&header)?;
+        let mut w: Vec<u8> = Vec::new();
+        w.extend_from_slice(MAGIC);
+        w.extend_from_slice(&VERSION.to_le_bytes());
+        w.extend_from_slice(&header_len.to_le_bytes());
+        w.extend_from_slice(&header);
         for c in &self.chains {
             let depth = c.offsets.len() as u8; // checked above
-            w.write_all(&index[c.module.as_str()].to_le_bytes())?;
-            w.write_all(&c.base_offset.to_le_bytes())?;
-            w.write_all(&[depth])?;
+            w.extend_from_slice(&index[c.module.as_str()].to_le_bytes());
+            w.extend_from_slice(&c.base_offset.to_le_bytes());
+            w.push(depth);
             for o in &c.offsets {
-                w.write_all(&o.to_le_bytes())?;
+                w.extend_from_slice(&o.to_le_bytes());
             }
         }
-        w.into_inner().map_err(|e| e.into_error())?.sync_all()
+        if w.len() as u64 > MAX_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("results too large to save (max {MAX_FILE_BYTES} bytes)"),
+            ));
+        }
+        atomic_write(path, &w)
     }
 
     /// Read results written by [`save`](Self::save).
     pub fn load(path: &Path) -> io::Result<PtrResults> {
-        let mut r = BufReader::new(File::open(path)?);
+        let file = open_regular(path)?;
+        if file.metadata()?.len() > MAX_FILE_BYTES {
+            return Err(too_large(MAX_FILE_BYTES));
+        }
+        // `take` also bounds a file that grows while it is read.
+        let mut r = BufReader::new(file.take(MAX_FILE_BYTES + 1));
         let mut magic = [0u8; 9];
         read_exact(&mut r, &mut magic)?;
         if &magic != MAGIC {
@@ -174,7 +201,10 @@ impl PtrResults {
         read_exact(&mut r, &mut header)?;
         let header: Header = serde_json::from_slice(&header)
             .map_err(|e| invalid(format!("bad pointer results header: {e}")))?;
-        let max_depth = header.settings.max_depth.min(u8::MAX as usize);
+        if let Some(m) = header.modules.iter().find(|m| !valid_module_name(m)) {
+            return Err(invalid(format!("invalid module name {m:?}")));
+        }
+        let max_depth = header.settings.max_depth.min(MAX_CHAIN_DEPTH);
 
         let mut chains = Vec::new();
         while let Some(module) = read_record_start(&mut r)? {
@@ -197,6 +227,9 @@ impl PtrResults {
                 base_offset,
                 offsets,
             });
+        }
+        if r.into_inner().limit() == 0 {
+            return Err(too_large(MAX_FILE_BYTES));
         }
         Ok(PtrResults {
             process: header.process,

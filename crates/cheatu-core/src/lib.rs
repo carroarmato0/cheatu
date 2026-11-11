@@ -15,6 +15,7 @@
 //! (`pkexec` on Linux, the admin prompt on macOS) when needed.
 
 pub mod addr_expr;
+mod file_io;
 pub mod maps;
 pub mod mem;
 pub mod pointer_scan;
@@ -27,7 +28,7 @@ mod sys;
 pub mod table;
 pub mod value;
 
-pub use addr_expr::{AddrExpr, Expr, ParseError, ResolveError};
+pub use addr_expr::{valid_module_name, AddrExpr, Expr, ParseError, ResolveError};
 pub use maps::{
     image_path, module_base, module_containing, module_name, read_maps, region_for, MemoryRegion,
     ModuleError, RegionKind,

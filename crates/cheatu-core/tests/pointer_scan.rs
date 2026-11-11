@@ -493,3 +493,113 @@ fn save_rejects_unloadable_chains() {
     );
     assert!(!path.exists(), "nothing written");
 }
+
+/// A results file written byte by byte, so `load` can be fed what `save`
+/// refuses to write.
+fn raw_results(modules: &[&str], max_depth: usize, chains: &[(u32, Vec<u64>)]) -> Vec<u8> {
+    let header = format!(
+        "{{\"process\":\"g\",\"target\":1,\"settings\":{{\"max_depth\":{max_depth},\
+         \"max_offset\":4096,\"alignment\":8,\"max_results\":10,\"chunk_entries\":10}},\
+         \"modules\":{},\"truncated\":false}}",
+        serde_json::to_string(modules).unwrap()
+    );
+    let mut b = b"CHEATUPTR".to_vec();
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    b.extend_from_slice(header.as_bytes());
+    for (module, offsets) in chains {
+        b.extend_from_slice(&module.to_le_bytes());
+        b.extend_from_slice(&0x10u64.to_le_bytes());
+        b.push(offsets.len() as u8);
+        for o in offsets {
+            b.extend_from_slice(&o.to_le_bytes());
+        }
+    }
+    b
+}
+
+const LONG_NAME: &str = "a123456789b123456789c123456789d123456789e123456789f123456789\
+    g123456789h123456789i123456789j123456789k123456789l123456789m123456789n123456789\
+    o123456789p123456789q123456789r123456789s123456789t123456789u123456789v123456789\
+    w123456789x123456789y123456789z1234";
+
+#[test]
+fn results_with_unexpressible_chains_are_refused() {
+    assert_eq!(LONG_NAME.len(), 255);
+    let path = temp_path("names.cheatu-ptr");
+    let load = |bytes: Vec<u8>| {
+        std::fs::write(&path, bytes).unwrap();
+        PtrResults::load(&path)
+    };
+    // The worst case that is accepted still makes a loadable expression.
+    let ok = load(raw_results(&[LONG_NAME], 40, &[(0, vec![u64::MAX; 32])])).unwrap();
+    assert!(ok.chains[0].to_expr().validate().is_ok());
+
+    let too_long = format!("{LONG_NAME}x");
+    for name in ["", "we\"ird", "tab\there", too_long.as_str()] {
+        let e = load(raw_results(&[name], 5, &[(0, vec![8])])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{name:?}");
+        assert!(e.to_string().contains("module name"), "{name:?}: {e}");
+
+        let mut r = sample();
+        r.chains[0].module = name.to_string();
+        let e = r.save(&path).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+    }
+    let e = load(raw_results(&["m"], 40, &[(0, vec![8; 33])])).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+
+    let mut r = sample();
+    r.settings.max_depth = 40;
+    r.chains.push(chain(0x50, &[8; 33]));
+    assert_eq!(
+        r.save(&path).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn results_save_replaces_instead_of_rewriting_in_place() {
+    let path = temp_path("replace.cheatu-ptr");
+    let other = temp_path("replace-link.cheatu-ptr");
+    let _ = std::fs::remove_file(&other);
+    std::fs::write(&path, "old").unwrap();
+    std::fs::hard_link(&path, &other).unwrap();
+    sample().save(&path).unwrap();
+    assert_eq!(std::fs::read(&other).unwrap(), b"old");
+    assert_eq!(PtrResults::load(&path).unwrap(), sample());
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&other).ok();
+}
+
+#[test]
+fn results_fifo_is_refused_promptly() {
+    let path = temp_path("fifo.cheatu-ptr");
+    let _ = std::fs::remove_file(&path);
+    let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = path.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(PtrResults::load(&p).map(|_| ()));
+    });
+    let e = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("load returned within 5 s")
+        .unwrap_err();
+    assert!(e.to_string().contains("not a regular file"), "{e}");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn chains_through_unnameable_modules_are_skipped() {
+    let mut src = fake();
+    for r in &mut src.regions {
+        if r.path == "/usr/lib/libgame.dylib" {
+            r.path = "/usr/lib/lib\"game.dylib".into();
+        }
+    }
+    let found = search(&src, T, &PtrScanSettings::default());
+    assert!(found.chains.is_empty(), "{:?}", found.chains);
+}

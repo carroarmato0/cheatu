@@ -198,3 +198,24 @@ fn aob_limited_to_module_and_skips_unreadable() {
         "aob(\"01 02 03 04\", \"b\") matched 0 times, must be unique"
     );
 }
+
+#[test]
+fn aob_module_scope_includes_bss_tail() {
+    let mut regions = vec![
+        region(0x1000, 0x1000, "/x/game"),
+        // The module's anonymous .bss tail.
+        region(0x2000, 0x1000, ""),
+    ];
+    for r in &mut regions {
+        r.write = true;
+    }
+    let src = Fake {
+        regions,
+        data: vec![
+            (0x1000, vec![0; 0x1000]),
+            (0x2000, buffer_with(&[0x40], 0x1000)),
+        ],
+    };
+    let e = parse(&format!("aob(\"{MARKER_HEX}\", \"game\")"));
+    assert_eq!(e.resolve(&src).unwrap(), 0x2040);
+}

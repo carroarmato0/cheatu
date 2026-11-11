@@ -178,3 +178,46 @@ fn module_scope_is_used() {
     assert_eq!(module.as_deref(), Some("libgame.so"));
     assert_eq!(sig.resolve(&src).unwrap(), addr);
 }
+
+#[test]
+fn bss_tail_is_searched_with_its_module() {
+    let base = 0x10000;
+    let tail = base + 4096;
+    let mut regions = vec![
+        region(base, 4096, "/usr/lib/libgame.so"),
+        // Anonymous .bss tail right after the image's last file-backed page.
+        region(tail, 4096, ""),
+    ];
+    for r in &mut regions {
+        r.write = true;
+    }
+    let bytes = random_bytes(8192);
+    let src = fake(
+        regions,
+        vec![
+            (base, bytes[..4096].to_vec()),
+            (tail, bytes[4096..].to_vec()),
+        ],
+        None,
+    );
+    let addr = tail + 1000;
+    let sig = make_signature(&src, addr, 64).expect("unique within the module");
+    let (_, module, _) = parts(&sig);
+    assert_eq!(module.as_deref(), Some("libgame.so"));
+    assert_eq!(sig.resolve(&src).unwrap(), addr);
+}
+
+#[test]
+fn unnameable_module_is_left_out_of_the_pattern() {
+    let base = 0x10000;
+    let src = fake(
+        vec![region(base, 4096, "/usr/lib/lib\"game.so")],
+        vec![(base, random_bytes(4096))],
+        None,
+    );
+    let addr = base + 1000;
+    let sig = make_signature(&src, addr, 64).unwrap();
+    assert_eq!(parts(&sig).1, None);
+    assert!(sig.validate().is_ok());
+    assert_eq!(sig.resolve(&src).unwrap(), addr);
+}

@@ -12,7 +12,7 @@
 
 use std::fmt;
 
-use crate::maps::{module_base, module_name, ModuleError};
+use crate::maps::{image_path, module_base, ModuleError};
 use crate::scan::parse_aob;
 use crate::source::MemSource;
 
@@ -91,11 +91,41 @@ impl AddrExpr {
         Ok(expr)
     }
 
+    /// Check that the expression survives a save and reload: its canonical
+    /// text parses back to the same expression. Expressions built in code
+    /// (pointer chains, signatures, module offsets) can break the parser's
+    /// limits or hold a module name with a `"`; this catches them before
+    /// they reach a table file.
+    pub fn validate(&self) -> Result<(), ParseError> {
+        let text = self.to_string();
+        match AddrExpr::parse(&text) {
+            Ok(back) if back == *self => Ok(()),
+            Ok(_) => Err(ParseError {
+                column: 1,
+                message: format!("expression does not read back the same: {text}"),
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
     /// True when no plain number is used as an address: every base is a
     /// module or `aob(...)`, numbers only appear as offsets.
     pub fn is_static(&self) -> bool {
         is_static(&self.0)
     }
+}
+
+/// Longest module name accepted in pointer results and built expressions,
+/// in bytes.
+pub const MAX_MODULE_NAME: usize = 255;
+
+/// Whether `name` can be written as `"name"` in an expression and read back:
+/// non-empty, at most [`MAX_MODULE_NAME`] bytes, no `"` and no control
+/// characters.
+pub fn valid_module_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_MODULE_NAME
+        && !name.chars().any(|c| c == '"' || c.is_control())
 }
 
 fn is_static(e: &Expr) -> bool {
@@ -178,8 +208,13 @@ pub(crate) fn find_matches(
     }
     let overlap = pat.len() - 1;
     let mut buf = vec![0u8; AOB_CHUNK + overlap];
-    'regions: for r in src.regions() {
-        if !r.read || module.is_some_and(|m| module_name(r) != Some(m)) {
+    let regions = src.regions();
+    'regions: for (i, r) in regions.iter().enumerate() {
+        // A module's anonymous `.bss` tail counts as part of it (see
+        // `image_path`).
+        let in_module =
+            |m: &str| image_path(regions, i).and_then(|p| p.rsplit('/').next()) == Some(m);
+        if !r.read || module.is_some_and(|m| !in_module(m)) {
             continue;
         }
         let mut start = r.start;
@@ -652,6 +687,37 @@ mod tests {
         assert!(!p("0x7ffe0000+0x4").is_static());
         assert!(!p("[0x7ffe0000]+0x4").is_static());
         assert!(!p("0x10").is_static());
+    }
+
+    #[test]
+    fn validate_rejects_what_would_not_reload() {
+        assert!(p("[\"m\"+0x10]+0x4").validate().is_ok());
+        let quoted = AddrExpr(Expr::Module("a\"b".into()));
+        assert!(quoted.validate().is_err());
+        let empty = AddrExpr(Expr::Module(String::new()));
+        assert!(empty.validate().is_err());
+        let mut deep = Expr::Num(1);
+        for _ in 0..65 {
+            deep = Expr::Deref(Box::new(deep));
+        }
+        let e = AddrExpr(deep).validate().unwrap_err();
+        assert_eq!(e.message, "expression nested too deeply");
+        let long = (0..60).fold(Expr::Num(u64::MAX), |e, _| {
+            Expr::Add(Box::new(e), Box::new(Expr::Num(u64::MAX)))
+        });
+        assert!(AddrExpr(long).validate().is_err());
+    }
+
+    #[test]
+    fn module_name_rules() {
+        assert!(valid_module_name("libgame.so"));
+        assert!(valid_module_name("My Game ゼルダ.exe"));
+        assert!(valid_module_name(&"x".repeat(255)));
+        assert!(!valid_module_name(&"x".repeat(256)));
+        assert!(!valid_module_name(""));
+        assert!(!valid_module_name("we\"ird"));
+        assert!(!valid_module_name("new\nline"));
+        assert!(!valid_module_name("del\u{7f}"));
     }
 
     fn arb_expr() -> impl Strategy<Value = Expr> {

@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::addr_expr::{count_matches, AddrExpr, Expr};
+use crate::addr_expr::{count_matches, valid_module_name, AddrExpr, Expr};
 use crate::maps::{module_containing, region_for};
 use crate::source::MemSource;
 
@@ -69,7 +69,11 @@ pub fn make_signature(
         .map(|i| (first[i] == second[i]).then_some(first[i]))
         .collect();
 
-    let module = module_containing(src.regions(), addr).map(|(name, _)| name);
+    // A module whose file name cannot be written in an expression is left
+    // out: the pattern then has to be unique in all of memory.
+    let module = module_containing(src.regions(), addr)
+        .map(|(name, _)| name)
+        .filter(|name| valid_module_name(name));
     let mut prev = (usize::MAX, usize::MAX);
     for size in (8..=max_len).step_by(8) {
         let lo = addr_idx.saturating_sub(size / 2);

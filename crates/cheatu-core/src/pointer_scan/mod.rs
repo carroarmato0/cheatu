@@ -13,7 +13,7 @@ mod search;
 use serde::{Deserialize, Serialize};
 
 pub use map::PointerMap;
-pub use results::PtrResults;
+pub use results::{PtrResults, MAX_CHAIN_DEPTH, MAX_FILE_BYTES};
 pub use search::{find_chains, ChainSearch, PointerChain};
 
 /// Limits for a pointer scan.

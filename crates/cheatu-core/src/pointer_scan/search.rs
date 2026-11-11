@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::io;
 
 use super::{PointerMap, PtrScanSettings};
-use crate::addr_expr::{AddrExpr, Expr, ResolveError};
+use crate::addr_expr::{valid_module_name, AddrExpr, Expr, ResolveError};
 use crate::maps::{module_base, module_containing};
 use crate::scan::{cancelled_err, ScanProgress};
 use crate::source::MemSource;
@@ -109,7 +109,11 @@ pub fn find_chains(
             for (value, location) in map.pointers_into(lo, t.saturating_add(1)) {
                 let offset = t - value;
                 if map.is_static(location) {
-                    let Some((module, base)) = module_containing(regions, location) else {
+                    // A module whose file name cannot be written in an
+                    // expression cannot name a chain (see `valid_module_name`).
+                    let Some((module, base)) = module_containing(regions, location)
+                        .filter(|(name, _)| valid_module_name(name))
+                    else {
                         continue;
                     };
                     if out.chains.len() >= settings.max_results {
