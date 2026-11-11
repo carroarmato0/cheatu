@@ -6,6 +6,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cheatu_core::pointer_scan::{find_chains, PointerChain, PointerMap, PtrScanSettings};
@@ -13,12 +14,12 @@ use cheatu_core::process::ProcInfo;
 use cheatu_core::scan::{FirstScan, NextScan, ScanProgress, Scanner};
 use cheatu_core::table::TableEntry;
 use cheatu_core::{
-    list_processes, module_containing, probe_address, AddrExpr, Expr, LiveSource, Mem, MemSource,
-    ProbeOutcome, ScanType, ScanValue,
+    list_processes, probe_address, AddrExpr, LiveSource, Mem, MemSource, ProbeOutcome, ScanType,
+    ScanValue,
 };
 use eframe::egui;
 
-use crate::cheat_table::{savable_value, value_text};
+use crate::cheat_table::{module_offset_expr, savable_value, value_text};
 use crate::pointer_window::{phase_label, resume_if_paused, PauseSlot, Paused, Phase};
 use crate::wizard::{Input, Step, VerifyPhase, Wizard, WizardBackend, MAX_CANDIDATES, MAX_CHAINS};
 
@@ -295,11 +296,7 @@ impl WizardBackend for RealBackend {
     }
 
     fn module_offset(&self, addr: u64) -> Option<AddrExpr> {
-        let (name, base) = module_containing(self.live.regions(), addr)?;
-        Some(AddrExpr(Expr::Add(
-            Box::new(Expr::Module(name)),
-            Box::new(Expr::Num(addr - base)),
-        )))
+        module_offset_expr(self.live.regions(), addr)
     }
 
     fn pointer_scan(&mut self, addr: u64) -> io::Result<usize> {
@@ -420,9 +417,41 @@ fn undo_test_write(inner: &mut Inner) {
     }
 }
 
+/// How long closing or exiting waits for a cancelled worker.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
+/// After a cancel: wait up to `limit` for the worker (`handle`, if any) to
+/// finish, so its pointer map is dropped and its test write, if it made one,
+/// is in the step; then put the test value back. Returns whether the wizard
+/// state could be reached (the worker finished and the lock was free).
+fn finish_then_undo(handle: Option<JoinHandle<()>>, inner: &Mutex<Inner>, limit: Duration) -> bool {
+    if let Some(handle) = handle {
+        let deadline = Instant::now() + limit;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !handle.is_finished() {
+            return false;
+        }
+        let _ = handle.join();
+    }
+    match inner.try_lock() {
+        Ok(mut g) => {
+            undo_test_write(&mut g);
+            true
+        }
+        Err(std::sync::TryLockError::Poisoned(p)) => {
+            undo_test_write(&mut p.into_inner());
+            true
+        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
+    }
+}
+
 /// One backend call in flight.
 struct Job {
     rx: Receiver<View>,
+    handle: JoinHandle<()>,
     /// A background "is the game back?" poll: the step stays on screen.
     quiet: bool,
 }
@@ -459,13 +488,7 @@ impl Drop for WizardWindow {
     /// Closing the wizard (or exiting) stops its work, never leaves the game
     /// paused, and puts back a test value it is still asking about.
     fn drop(&mut self) {
-        self.activity.cancel();
-        resume_if_paused(&self.activity.paused, cheatu_core::resume);
-        if self.job.is_none() {
-            if let Ok(mut inner) = self.inner.try_lock() {
-                undo_test_write(&mut inner);
-            }
-        }
+        self.shutdown();
     }
 }
 
@@ -511,9 +534,20 @@ impl WizardWindow {
         self.job.is_some() || matches!(self.view.step, Step::WaitRestart { .. })
     }
 
-    /// The app is exiting: stop the work and resume a paused target.
+    /// The pid the wizard works on (it follows a restarted game).
+    pub fn pid(&self) -> i32 {
+        self.view.pid
+    }
+
+    /// Closing or exiting: cancel the work and resume a paused target, wait
+    /// up to [`SHUTDOWN_WAIT`] for the worker (so a pointer map's temp files
+    /// are removed), then put back a test value still in the game.
     pub fn shutdown(&mut self) {
         self.activity.cancel();
+        resume_if_paused(&self.activity.paused, cheatu_core::resume);
+        let handle = self.job.take().map(|j| j.handle);
+        finish_then_undo(handle, &self.inner, SHUTDOWN_WAIT);
+        // A worker that paused only after the resume above.
         resume_if_paused(&self.activity.paused, cheatu_core::resume);
     }
 
@@ -528,7 +562,7 @@ impl WizardWindow {
         let inner = self.inner.clone();
         let ty = self.ty;
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let mut g = lock(&inner);
             if matches!(input, Input::StartOver) {
                 undo_test_write(&mut g);
@@ -542,7 +576,7 @@ impl WizardWindow {
             backend.activity.set(Stage::Idle);
             let _ = tx.send(view_of(&mut g));
         });
-        self.job = Some(Job { rx, quiet });
+        self.job = Some(Job { rx, handle, quiet });
     }
 
     /// Take a finished call's result.
@@ -1177,6 +1211,44 @@ mod tests {
         assert!(b.restore(addr).is_err(), "nothing left to restore");
 
         assert_eq!(b.process_running("no such process name"), None);
+        drop(v);
+    }
+
+    #[test]
+    fn closing_mid_test_write_puts_the_value_back() {
+        use crate::wizard::WizardBackend;
+        let mut v = Box::new(0i32);
+        *v = std::hint::black_box(0x1357_0000) + std::hint::black_box(0x2468);
+        let before = *v;
+        let addr = &*v as *const i32 as u64;
+        let read = |b: &i32| unsafe { std::ptr::read_volatile(b) };
+        let inner = Arc::new(Mutex::new(Inner {
+            wizard: Wizard::new(ScanType::I32),
+            backend: backend(),
+        }));
+        // The worker is still writing test values when the window closes.
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let handle = {
+            let (inner, started) = (inner.clone(), started.clone());
+            std::thread::spawn(move || {
+                let mut g = lock(&inner);
+                started.wait();
+                std::thread::sleep(Duration::from_millis(200));
+                g.backend.poke(addr).unwrap();
+                g.wizard.step = Step::Verify {
+                    remaining: vec![addr],
+                    phase: VerifyPhase::Testing {
+                        current: addr,
+                        left: Vec::new(),
+                    },
+                };
+            })
+        };
+        started.wait();
+        assert!(finish_then_undo(Some(handle), &inner, SHUTDOWN_WAIT));
+        assert_eq!(read(&v), before, "test value undone");
+        // Nothing running: undo right away.
+        assert!(finish_then_undo(None, &inner, SHUTDOWN_WAIT));
         drop(v);
     }
 

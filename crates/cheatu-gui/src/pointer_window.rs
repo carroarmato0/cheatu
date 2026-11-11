@@ -104,15 +104,25 @@ pub fn filter_address(s: &str) -> Result<AddrExpr, String> {
     AddrExpr::parse(s.trim()).map_err(|e| format!("bad expression: {e}"))
 }
 
-/// The table entry "Add to table" makes for `chain`.
-pub fn entry_for_chain(chain: &PointerChain, ty: ScanType, value: Option<String>) -> TableEntry {
-    TableEntry {
+/// The table entry "Add to table" makes for `chain`, or why it cannot be
+/// saved in a table (a chain from a shared results file can break the
+/// expression limits).
+pub fn entry_for_chain(
+    chain: &PointerChain,
+    ty: ScanType,
+    value: Option<String>,
+) -> Result<TableEntry, String> {
+    let address = chain.to_expr();
+    address
+        .validate()
+        .map_err(|e| format!("This chain cannot be saved in a table: {e}."))?;
+    Ok(TableEntry {
         description: "Pointer chain".into(),
-        address: chain.to_expr(),
+        address,
         ty,
         value: value.unwrap_or_else(|| "0".into()),
         frozen: false,
-    }
+    })
 }
 
 /// Extension of pointer scan results files.
@@ -182,7 +192,7 @@ enum Done {
 
 /// How the results are filtered.
 enum FilterBy {
-    /// An address expression or hex, resolved in the process.
+    /// An address expression, resolved in the process.
     Address(String),
     Value(ScanType, ScanValue),
 }
@@ -792,7 +802,10 @@ impl PointerWindow {
                                     ScanType::Bytes(n) => Some(vec!["00"; n].join(" ")),
                                     _ => None,
                                 });
-                            add = Some(entry_for_chain(c, ty, value));
+                            match entry_for_chain(c, ty, value) {
+                                Ok(e) => add = Some(e),
+                                Err(e) => self.message = e,
+                            }
                         }
                     }
                 }
@@ -1042,7 +1055,7 @@ mod tests {
     #[test]
     fn add_to_table_entry() {
         let c = chain("game.exe", 0x1a2b30, &[0x48, 0x10]);
-        let e = entry_for_chain(&c, ScanType::F32, Some("1.5".into()));
+        let e = entry_for_chain(&c, ScanType::F32, Some("1.5".into())).unwrap();
         assert_eq!(e.description, "Pointer chain");
         assert_eq!(e.address, c.to_expr());
         assert_eq!(e.address.to_string(), "[[\"game.exe\"+0x1a2b30]+0x48]+0x10");
@@ -1050,7 +1063,11 @@ mod tests {
         assert_eq!(e.value, "1.5");
         assert!(!e.frozen);
 
-        let e = entry_for_chain(&c, ScanType::I32, None);
+        let e = entry_for_chain(&c, ScanType::I32, None).unwrap();
         assert_eq!(e.value, "0");
+
+        let bad = chain("we\"ird", 0x10, &[0x8]);
+        let err = entry_for_chain(&bad, ScanType::I32, None).unwrap_err();
+        assert!(err.contains("cannot be saved"), "{err}");
     }
 }

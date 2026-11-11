@@ -1340,6 +1340,8 @@ struct CheatuApp {
     scanning: bool,
     /// Progress and cancellation for the scan on the worker thread.
     scan_progress: Option<Arc<ScanProgress>>,
+    /// The pid the main scan has suspended, so exiting mid-scan resumes it.
+    scan_paused: pointer_window::PauseSlot,
     status: String,
 
     // Background probe (active "which one sticks" disambiguation).
@@ -1582,12 +1584,23 @@ impl CheatuApp {
         self.scan_progress = Some(scanner.progress());
         self.status = "Scanning…".into();
         let pause = self.pause_while_scanning;
+        let pause_slot = self.scan_paused.clone();
 
         std::thread::spawn(move || {
             let pid = scanner.pid();
             // Suspend the target so values hold still and reads don't race the
-            // game. Only resume if we actually managed to suspend it.
-            let paused = pause && cheatu_core::suspend(pid).is_ok();
+            // game. The guard resumes it (only if it was suspended), and the
+            // slot lets `on_exit` resume it when the app quits mid-scan.
+            let paused = pause
+                .then(|| {
+                    pointer_window::Paused::new(
+                        &pause_slot,
+                        pid,
+                        cheatu_core::suspend,
+                        cheatu_core::resume,
+                    )
+                })
+                .flatten();
             let res = match job {
                 Job::First(fs) => {
                     scanner.reset();
@@ -1595,9 +1608,7 @@ impl CheatuApp {
                 }
                 Job::Next(cmp, operand) => scanner.next_scan(cmp, operand.as_deref()),
             };
-            if paused {
-                let _ = cheatu_core::resume(pid);
-            }
+            drop(paused);
             let message = match res {
                 Ok(()) => format!("{} results.", scanner.count()),
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
@@ -2200,9 +2211,11 @@ impl CheatuApp {
 }
 
 impl eframe::App for CheatuApp {
-    /// Never leave the target stopped: a pointer scan may have it suspended,
-    /// and exiting kills the worker before its guard can resume it.
+    /// Never leave the target stopped: a scan, pointer scan or wizard scan
+    /// may have it suspended, and exiting kills the worker before its guard
+    /// can resume it.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        pointer_window::resume_if_paused(&self.scan_paused, cheatu_core::resume);
         if let Some(w) = &mut self.pointer_window {
             w.shutdown();
         }
@@ -3464,11 +3477,14 @@ impl eframe::App for CheatuApp {
             for event in w.show(ctx) {
                 match event {
                     WizardEvent::Save(entry) => {
-                        self.status = format!(
-                            "Added \"{}\" ({}) to the cheat table.",
-                            entry.description, entry.address
-                        );
-                        self.saved.push(GuiEntry::new(entry, false));
+                        let attached = self.attached.as_ref().map(|(pid, _)| *pid);
+                        match cheat_table::wizard_entry(entry, w.pid(), attached) {
+                            Ok((entry, status)) => {
+                                self.status = status;
+                                self.saved.push(GuiEntry::new(entry, false));
+                            }
+                            Err(e) => self.status = e,
+                        }
                     }
                     // Follow the wizard to the restarted game, so the cheat
                     // table re-resolves there.

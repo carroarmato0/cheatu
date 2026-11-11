@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use cheatu_core::process::ProcInfo;
 use cheatu_core::table::{self, TableEntry, TableError};
 use cheatu_core::{
-    module_containing, AddrExpr, Expr, MemoryRegion, ScanType, ScanValue, SignatureError,
+    module_containing, valid_module_name, AddrExpr, Expr, MemoryRegion, ScanType, ScanValue,
+    SignatureError,
 };
 
 /// A frozen entry re-resolves this often: pointers can change when the game
@@ -168,24 +169,64 @@ pub fn apply_background_result(
     true
 }
 
+/// `"module"+offset` for an address in a module's image whose file name can be
+/// written in an expression (see [`cheatu_core::valid_module_name`]).
+pub fn module_offset_expr(regions: &[MemoryRegion], addr: u64) -> Option<AddrExpr> {
+    let (name, base) = module_containing(regions, addr).filter(|(n, _)| valid_module_name(n))?;
+    Some(AddrExpr(Expr::Add(
+        Box::new(Expr::Module(name)),
+        Box::new(Expr::Num(addr - base)),
+    )))
+}
+
+/// The entry the wizard's Save adds, and the status bar text. `wizard_pid` is
+/// the process the wizard found the address in, `attached` the one the cheat
+/// table runs against: when they differ the entry is added unfrozen, so it is
+/// never written into the wrong process. An expression that would not save
+/// is refused.
+pub fn wizard_entry(
+    entry: TableEntry,
+    wizard_pid: i32,
+    attached: Option<i32>,
+) -> Result<(TableEntry, String), String> {
+    let mut entry = entry;
+    entry
+        .address
+        .validate()
+        .map_err(|e| format!("The wizard's address cannot be saved in a table: {e}."))?;
+    let added = format!(
+        "Added \"{}\" ({}) to the cheat table.",
+        entry.description, entry.address
+    );
+    if attached == Some(wizard_pid) {
+        return Ok((entry, added));
+    }
+    entry.frozen = false;
+    let now = match attached {
+        Some(pid) => format!("cheatu is attached to pid {pid}"),
+        None => "cheatu is not attached".into(),
+    };
+    Ok((
+        entry,
+        format!(
+            "{added} Not frozen: the wizard found it in pid {wizard_pid}, but {now}; \
+             check the address before freezing it."
+        ),
+    ))
+}
+
 /// A new entry for a scan result: `"module"+offset` when the address is in a
 /// module's image, else the plain address. The value is a zero of the type;
 /// the caller fills in the live value when it can read it.
 pub fn entry_for_address(regions: &[MemoryRegion], addr: u64, ty: ScanType) -> TableEntry {
-    let expr = match module_containing(regions, addr) {
-        Some((name, base)) => Expr::Add(
-            Box::new(Expr::Module(name)),
-            Box::new(Expr::Num(addr - base)),
-        ),
-        None => Expr::Num(addr),
-    };
+    let address = module_offset_expr(regions, addr).unwrap_or(AddrExpr(Expr::Num(addr)));
     let value = match ty {
         ScanType::Bytes(n) => vec!["00"; n].join(" "),
         _ => "0".into(),
     };
     TableEntry {
         description: String::new(),
-        address: AddrExpr(expr),
+        address,
         ty,
         value,
         frozen: false,
@@ -447,6 +488,40 @@ frozen = true
 
         let heap = entry_for_address(&regions, 0x50010, ScanType::I32);
         assert_eq!(heap.address.to_string(), "0x50010");
+    }
+
+    #[test]
+    fn unnameable_module_falls_back_to_plain_address() {
+        let regions = [region(0x10000, 0x11000, "/games/we\"ird.exe")];
+        assert_eq!(module_offset_expr(&regions, 0x10040), None);
+        let e = entry_for_address(&regions, 0x10040, ScanType::I32);
+        assert_eq!(e.address.to_string(), "0x10040");
+        let ok = [region(0x10000, 0x11000, "/games/game.exe")];
+        assert_eq!(
+            module_offset_expr(&ok, 0x10040).unwrap().to_string(),
+            "\"game.exe\"+0x40"
+        );
+    }
+
+    #[test]
+    fn wizard_entry_stays_unfrozen_for_another_process() {
+        let mut e = entry("[\"game\"+0x10]+0x8", true).entry;
+        e.description = "Gold".into();
+        let (same, status) = wizard_entry(e.clone(), 10, Some(10)).unwrap();
+        assert!(same.frozen);
+        assert!(status.contains("Gold"), "{status}");
+
+        let (other, status) = wizard_entry(e.clone(), 10, Some(20)).unwrap();
+        assert!(!other.frozen, "never frozen into another process");
+        assert!(
+            status.contains("pid 10") && status.contains("pid 20"),
+            "{status}"
+        );
+        let (detached, _) = wizard_entry(e.clone(), 10, None).unwrap();
+        assert!(!detached.frozen);
+
+        e.address = AddrExpr(Expr::Module("we\"ird".into()));
+        assert!(wizard_entry(e, 10, Some(10)).is_err());
     }
 
     #[test]
