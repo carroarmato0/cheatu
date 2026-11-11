@@ -133,14 +133,35 @@ pub fn module_base(regions: &[MemoryRegion], name: &str) -> Result<u64, ModuleEr
     }
 }
 
+/// The path of the module image that `regions[i]` belongs to, if any.
+///
+/// A file-backed region belongs to its own file. On Linux the part of a
+/// writable segment's `.bss` beyond the last file-backed page is an anonymous
+/// mapping with no path, so an empty-path read+write region that starts
+/// exactly where a module's region ends counts as part of that module (its
+/// zero-initialised statics live there).
+pub fn image_path(regions: &[MemoryRegion], i: usize) -> Option<&str> {
+    let r = regions.get(i)?;
+    if module_name(r).is_some() {
+        return Some(&r.path);
+    }
+    let prev = regions.get(i.checked_sub(1)?)?;
+    let bss_tail = r.path.is_empty() && r.read && r.write && prev.end == r.start;
+    (bss_tail && module_name(prev).is_some()).then_some(prev.path.as_str())
+}
+
 /// The image containing `addr` as `(name, base)`, or `None` for anonymous
-/// memory and pseudo-regions.
+/// memory and pseudo-regions. A module's anonymous `.bss` tail counts as part
+/// of the image (see [`image_path`]).
 pub fn module_containing(regions: &[MemoryRegion], addr: u64) -> Option<(String, u64)> {
-    let region = region_for(regions, addr)?;
-    let name = module_name(region)?;
+    let i = regions
+        .iter()
+        .position(|r| addr >= r.start && addr < r.end)?;
+    let path = image_path(regions, i)?;
+    let name = path.rsplit('/').next()?;
     let base = regions
         .iter()
-        .filter(|r| r.path == region.path)
+        .filter(|r| r.path == path)
         .map(|r| r.start)
         .min()?;
     Some((name.to_string(), base))
@@ -160,6 +181,46 @@ mod tests {
             shared: false,
             path: path.to_string(),
         }
+    }
+
+    fn rw(start: u64, end: u64, path: &str) -> MemoryRegion {
+        MemoryRegion {
+            write: true,
+            ..region(start, end, path)
+        }
+    }
+
+    #[test]
+    fn anonymous_bss_tail_belongs_to_module() {
+        let regions = vec![
+            region(0x1000, 0x2000, "/x/game"),
+            rw(0x2000, 0x3000, "/x/game"),
+            // .bss beyond the last file-backed page: adjacent, no path.
+            rw(0x3000, 0x5000, ""),
+            // Anonymous, not adjacent to an image.
+            rw(0x8000, 0x9000, ""),
+            // Adjacent to the .bss tail only, not to the image itself.
+            rw(0x9000, 0xa000, ""),
+        ];
+        let game = Some(("game".to_string(), 0x1000));
+        assert_eq!(module_containing(&regions, 0x2008), game);
+        assert_eq!(module_containing(&regions, 0x4ff8), game);
+        assert_eq!(module_containing(&regions, 0x8008), None);
+        assert_eq!(module_containing(&regions, 0x9008), None);
+        assert_eq!(image_path(&regions, 2), Some("/x/game"));
+        assert_eq!(image_path(&regions, 3), None);
+    }
+
+    #[test]
+    fn readonly_or_named_neighbours_are_not_bss() {
+        let regions = vec![
+            rw(0x1000, 0x2000, "/x/game"),
+            region(0x2000, 0x3000, ""),
+            rw(0x3000, 0x4000, "/x/other"),
+            rw(0x4000, 0x5000, "[heap]"),
+        ];
+        assert_eq!(module_containing(&regions, 0x2008), None, "read-only");
+        assert_eq!(module_containing(&regions, 0x4008), None, "[heap]");
     }
 
     #[test]

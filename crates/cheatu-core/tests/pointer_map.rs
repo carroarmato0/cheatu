@@ -334,3 +334,16 @@ fn default_settings() {
         (5, 0x1000, 8, 1_000_000, 4 * 1024 * 1024)
     );
 }
+
+#[test]
+fn anonymous_bss_tail_is_static() {
+    let _g = lock();
+    let mut src = fake(1);
+    // Anonymous rw region right after the module's rw data: its .bss tail.
+    src.regions.insert(2, rw(0x30000, 0x1000, ""));
+    src.data.push((0x30000, vec![0u8; 0x1000]));
+    let map =
+        PointerMap::build(&src, &PtrScanSettings::default(), &ScanProgress::default()).unwrap();
+    assert!(map.is_static(0x30008));
+    assert!(!map.is_static(0x1000_0008));
+}

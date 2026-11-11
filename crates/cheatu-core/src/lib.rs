@@ -29,8 +29,8 @@ pub mod value;
 
 pub use addr_expr::{AddrExpr, Expr, ParseError, ResolveError};
 pub use maps::{
-    module_base, module_containing, module_name, read_maps, region_for, MemoryRegion, ModuleError,
-    RegionKind,
+    image_path, module_base, module_containing, module_name, read_maps, region_for, MemoryRegion,
+    ModuleError, RegionKind,
 };
 pub use mem::{probe_address, Mem, ProbeOutcome};
 pub use process::{human_bytes, list_processes, resume, suspend, ProcInfo};

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use memmap2::Mmap;
 
 use super::PtrScanSettings;
-use crate::maps::{module_name, MemoryRegion};
+use crate::maps::{image_path, MemoryRegion};
 use crate::scan::{cancelled_err, ScanProgress};
 use crate::source::MemSource;
 
@@ -67,7 +67,12 @@ impl PointerMap {
         }
         let regions = src.regions();
         let readable = merged_ranges(regions.iter().filter(|r| r.read));
-        let modules = merged_ranges(regions.iter().filter(|r| module_name(r).is_some()));
+        // Module images, including an anonymous `.bss` tail (see `image_path`).
+        let modules = merged_ranges(
+            (0..regions.len())
+                .filter(|&i| image_path(regions, i).is_some())
+                .map(|i| &regions[i]),
+        );
         let scannable: Vec<&MemoryRegion> = regions.iter().filter(|r| r.is_scannable()).collect();
         progress.begin(scannable.iter().map(|r| r.size() as usize).sum());
 
