@@ -1,0 +1,9 @@
+version = 1
+process = "dmhost"            # optional
+
+[[entry]]
+description = "Rupees"
+address = '[["dmhost"+0x1a2b30]+0x48]+0x6337e134'
+type = "i16"
+value = "200"
+frozen = true

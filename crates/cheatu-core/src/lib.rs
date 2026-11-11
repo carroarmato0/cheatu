@@ -21,6 +21,7 @@ pub mod process;
 pub mod scan;
 pub mod source;
 mod sys;
+pub mod table;
 pub mod value;
 
 pub use addr_expr::{AddrExpr, Expr, ParseError, ResolveError};
