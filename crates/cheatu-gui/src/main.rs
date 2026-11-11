@@ -2195,6 +2195,14 @@ impl CheatuApp {
 }
 
 impl eframe::App for CheatuApp {
+    /// Never leave the target stopped: a pointer scan may have it suspended,
+    /// and exiting kills the worker before its guard can resume it.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(w) = &mut self.pointer_window {
+            w.shutdown();
+        }
+    }
+
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         use eframe::egui;
 

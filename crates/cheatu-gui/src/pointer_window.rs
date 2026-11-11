@@ -2,9 +2,11 @@
 //! search, and the results with their filters, save/open and "Add to table".
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use cheatu_core::pointer_scan::{
     find_chains, PointerChain, PointerMap, PtrResults, PtrScanSettings,
@@ -96,17 +98,10 @@ pub fn phase_label(phase: Phase, fraction: Option<f32>) -> &'static str {
     }
 }
 
-/// A hex address (`0x…` or bare hex digits), if `s` is one.
-pub fn hex_address(s: &str) -> Option<Result<u64, String>> {
-    let s = s.trim();
-    let digits = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(u64::from_str_radix(digits, 16).map_err(|_| format!("address {s} is out of range")))
+/// The "Filter with new address" input as an address expression (`0x` for
+/// hex; bare digits are decimal).
+pub fn filter_address(s: &str) -> Result<AddrExpr, String> {
+    AddrExpr::parse(s.trim()).map_err(|e| format!("bad expression: {e}"))
 }
 
 /// The table entry "Add to table" makes for `chain`.
@@ -123,19 +118,53 @@ pub fn entry_for_chain(chain: &PointerChain, ty: ScanType, value: Option<String>
 /// Extension of pointer scan results files.
 const PTR_EXT: &str = "cheatu-ptr";
 
+/// The pid suspended for a map snapshot, or 0. Shared between the worker's
+/// [`Paused`] guard and the window/app, so a target is resumed even when the
+/// app exits while the worker is still reading (exiting does not unwind the
+/// worker, so its guard would never run).
+pub type PauseSlot = Arc<AtomicI32>;
+
+type SignalFn = fn(i32) -> std::io::Result<()>;
+
 /// Resumes a target suspended for the map snapshot, also when the build
 /// fails, is cancelled or panics.
-struct Paused(i32);
+struct Paused {
+    slot: PauseSlot,
+    resume: SignalFn,
+}
 
 impl Paused {
-    fn new(pid: i32) -> Option<Paused> {
-        cheatu_core::suspend(pid).ok().map(|()| Paused(pid))
+    /// Suspend `pid` and record it in `slot`. `None` when it could not be
+    /// suspended.
+    fn new(slot: &PauseSlot, pid: i32, suspend: SignalFn, resume: SignalFn) -> Option<Paused> {
+        // Recorded before stopping it, so an exit in between still resumes.
+        slot.store(pid, Ordering::SeqCst);
+        if suspend(pid).is_err() {
+            slot.store(0, Ordering::SeqCst);
+            return None;
+        }
+        Some(Paused {
+            slot: slot.clone(),
+            resume,
+        })
     }
 }
 
 impl Drop for Paused {
     fn drop(&mut self) {
-        let _ = cheatu_core::resume(self.0);
+        resume_if_paused(&self.slot, self.resume);
+    }
+}
+
+/// Resume the pid recorded in `slot`, if any, and clear it. Only the first
+/// of several callers resumes. Returns whether this call resumed.
+pub fn resume_if_paused(slot: &AtomicI32, resume: SignalFn) -> bool {
+    match slot.swap(0, Ordering::SeqCst) {
+        0 => false,
+        pid => {
+            let _ = resume(pid);
+            true
+        }
     }
 }
 
@@ -169,6 +198,8 @@ struct Job {
     pid: i32,
     kind: JobKind,
     rx: Receiver<Done>,
+    /// Joined (with a time bound) when the app exits.
+    handle: JoinHandle<()>,
 }
 
 impl Job {
@@ -218,13 +249,20 @@ pub struct PointerWindow {
     message: String,
     dialog: Option<(DialogKind, FileDialog)>,
     last_dir: Option<PathBuf>,
+    /// The target pid while a scan has it suspended.
+    paused: PauseSlot,
 }
 
+/// How long [`PointerWindow::shutdown`] waits for a cancelled job.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
 impl Drop for PointerWindow {
+    /// Closing the window stops its job and never leaves the target paused.
     fn drop(&mut self) {
         if let Some(job) = &self.job {
             job.cancel();
         }
+        resume_if_paused(&self.paused, cheatu_core::resume);
     }
 }
 
@@ -254,6 +292,7 @@ impl PointerWindow {
             message: String::new(),
             dialog: None,
             last_dir: None,
+            paused: PauseSlot::default(),
         }
     }
 
@@ -281,6 +320,27 @@ impl PointerWindow {
         self.open
     }
 
+    /// The app is exiting: cancel the job, resume a target it paused, and
+    /// give the worker up to [`SHUTDOWN_WAIT`] to stop. The target is
+    /// resumed first, because exiting kills the worker without unwinding.
+    pub fn shutdown(&mut self) {
+        let Some(job) = self.job.take() else {
+            resume_if_paused(&self.paused, cheatu_core::resume);
+            return;
+        };
+        job.cancel();
+        resume_if_paused(&self.paused, cheatu_core::resume);
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        while !job.handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if job.handle.is_finished() {
+            let _ = job.handle.join();
+        }
+        // A worker that paused only after the resume above.
+        resume_if_paused(&self.paused, cheatu_core::resume);
+    }
+
     /// A scan or filter is running.
     pub fn busy(&self) -> bool {
         self.job.is_some()
@@ -301,12 +361,17 @@ impl PointerWindow {
         let (tx, rx) = mpsc::channel();
         let (target, process, pause) = (self.target, self.process.clone(), self.pause_target);
         let (ph, mp, sp) = (phase.clone(), map_p.clone(), search_p.clone());
-        std::thread::spawn(move || {
+        let slot = self.paused.clone();
+        let handle = std::thread::spawn(move || {
             let run = || -> Result<PtrResults, String> {
                 let src = LiveSource::open(pid).map_err(|e| format!("cannot read process: {e}"))?;
                 let map = {
                     // Held only while the snapshot is taken.
-                    let _paused = if pause { Paused::new(pid) } else { None };
+                    let _paused = if pause {
+                        Paused::new(&slot, pid, cheatu_core::suspend, cheatu_core::resume)
+                    } else {
+                        None
+                    };
                     PointerMap::build(&src, &settings, &mp)
                 }
                 .map_err(scan_error)?;
@@ -331,6 +396,7 @@ impl PointerWindow {
                 search: search_p,
             },
             rx,
+            handle,
         });
     }
 
@@ -339,18 +405,14 @@ impl PointerWindow {
             return;
         };
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let run = || -> Result<(PtrResults, usize), String> {
                 let src = LiveSource::open(pid).map_err(|e| format!("cannot read process: {e}"))?;
                 let n = match by {
                     FilterBy::Address(text) => {
-                        let addr = match hex_address(&text) {
-                            Some(a) => a?,
-                            None => AddrExpr::parse(text.trim())
-                                .map_err(|e| format!("bad expression: {e}"))?
-                                .resolve(&src)
-                                .map_err(|e| e.to_string())?,
-                        };
+                        let addr = filter_address(&text)?
+                            .resolve(&src)
+                            .map_err(|e| e.to_string())?;
                         res.filter_by_address(&src, addr)
                     }
                     FilterBy::Value(ty, v) => res.filter_by_value(&src, ty, &v),
@@ -364,6 +426,7 @@ impl PointerWindow {
             pid,
             kind: JobKind::Filter,
             rx,
+            handle,
         });
     }
 
@@ -486,7 +549,7 @@ impl PointerWindow {
         );
         let filter_addr_ok = {
             let t = self.filter_addr.trim();
-            !t.is_empty() && (hex_address(t).is_some() || AddrExpr::parse(t).is_ok())
+            !t.is_empty() && filter_address(t).is_ok()
         };
         let filter_value = self.value_ty.parse(self.filter_value.trim());
         let same_process = pid.is_some() && pid == self.target_pid;
@@ -898,15 +961,77 @@ mod tests {
     }
 
     #[test]
-    fn hex_addresses() {
-        assert_eq!(hex_address("0x1A2b"), Some(Ok(0x1a2b)));
-        assert_eq!(hex_address("7ff0"), Some(Ok(0x7ff0)));
-        assert_eq!(hex_address(" 0X10 "), Some(Ok(0x10)));
-        assert!(hex_address("0x1ffffffffffffffff").unwrap().is_err());
-        assert_eq!(hex_address("\"game\"+0x10"), None);
-        assert_eq!(hex_address("[0x10]"), None);
-        assert_eq!(hex_address("0x"), None);
-        assert_eq!(hex_address(""), None);
+    fn filter_address_is_an_expression() {
+        use cheatu_core::Expr;
+        let num = |n| AddrExpr(Expr::Num(n));
+        assert_eq!(
+            filter_address("1234"),
+            Ok(num(1234)),
+            "bare digits are decimal"
+        );
+        assert_eq!(filter_address(" 0x7ff0 "), Ok(num(0x7ff0)));
+        assert_eq!(filter_address("0X10"), Ok(num(0x10)));
+        assert_eq!(
+            filter_address("[\"game\"+0x10]+0x8").unwrap().to_string(),
+            "[\"game\"+0x10]+0x8"
+        );
+        assert!(filter_address("7ff0").is_err(), "hex needs 0x");
+        assert!(filter_address("").is_err());
+        assert!(filter_address("[0x10").is_err());
+    }
+
+    thread_local! {
+        static CALLS: std::cell::RefCell<Vec<(&'static str, i32)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    fn fake_suspend(pid: i32) -> std::io::Result<()> {
+        CALLS.with(|c| c.borrow_mut().push(("stop", pid)));
+        if pid < 0 {
+            return Err(std::io::Error::other("no such process"));
+        }
+        Ok(())
+    }
+    fn fake_resume(pid: i32) -> std::io::Result<()> {
+        CALLS.with(|c| c.borrow_mut().push(("cont", pid)));
+        Ok(())
+    }
+    fn calls() -> Vec<(&'static str, i32)> {
+        CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    }
+
+    #[test]
+    fn pause_guard_records_and_clears_the_pid() {
+        calls();
+        let slot = PauseSlot::default();
+        let g = Paused::new(&slot, 42, fake_suspend, fake_resume).expect("suspended");
+        assert_eq!(slot.load(Ordering::SeqCst), 42);
+        assert_eq!(calls(), vec![("stop", 42)]);
+        drop(g);
+        assert_eq!(slot.load(Ordering::SeqCst), 0);
+        assert_eq!(calls(), vec![("cont", 42)]);
+
+        // Could not suspend: nothing recorded, nothing resumed.
+        assert!(Paused::new(&slot, -5, fake_suspend, fake_resume).is_none());
+        assert_eq!(slot.load(Ordering::SeqCst), 0);
+        assert_eq!(calls(), vec![("stop", -5)]);
+    }
+
+    #[test]
+    fn resume_if_paused_resumes_exactly_once() {
+        calls();
+        let slot = PauseSlot::default();
+        assert!(!resume_if_paused(&slot, fake_resume), "nothing paused");
+        assert!(calls().is_empty());
+
+        let g = Paused::new(&slot, 7, fake_suspend, fake_resume).unwrap();
+        calls();
+        // The app exits: it resumes the target...
+        assert!(resume_if_paused(&slot, fake_resume));
+        assert!(!resume_if_paused(&slot, fake_resume));
+        // ...and the worker's guard, if it still runs, does not resume again.
+        drop(g);
+        assert_eq!(calls(), vec![("cont", 7)]);
+        assert_eq!(slot.load(Ordering::SeqCst), 0);
     }
 
     #[test]
