@@ -124,11 +124,11 @@ const PTR_EXT: &str = "cheatu-ptr";
 /// worker, so its guard would never run).
 pub type PauseSlot = Arc<AtomicI32>;
 
-type SignalFn = fn(i32) -> std::io::Result<()>;
+pub(crate) type SignalFn = fn(i32) -> std::io::Result<()>;
 
 /// Resumes a target suspended for the map snapshot, also when the build
-/// fails, is cancelled or panics.
-struct Paused {
+/// fails, is cancelled or panics. Also used by the cheat wizard's scans.
+pub(crate) struct Paused {
     slot: PauseSlot,
     resume: SignalFn,
 }
@@ -136,7 +136,12 @@ struct Paused {
 impl Paused {
     /// Suspend `pid` and record it in `slot`. `None` when it could not be
     /// suspended.
-    fn new(slot: &PauseSlot, pid: i32, suspend: SignalFn, resume: SignalFn) -> Option<Paused> {
+    pub(crate) fn new(
+        slot: &PauseSlot,
+        pid: i32,
+        suspend: SignalFn,
+        resume: SignalFn,
+    ) -> Option<Paused> {
         // Recorded before stopping it, so an exit in between still resumes.
         slot.store(pid, Ordering::SeqCst);
         if suspend(pid).is_err() {

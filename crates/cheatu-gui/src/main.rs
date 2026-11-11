@@ -9,9 +9,8 @@
 mod cheat_table;
 mod file_dialog;
 mod pointer_window;
-// Task 12 builds the egui window and the real backend on top of this.
-#[allow(dead_code)]
 mod wizard;
+mod wizard_ui;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +34,7 @@ use cheatu_inject::{agent, detect_dir, find_rpgmaker_games, scan_dir, Engine, Fo
 use cheat_table::GuiEntry;
 use file_dialog::FileDialog;
 use pointer_window::PointerWindow;
+use wizard_ui::{WizardEvent, WizardWindow};
 
 /// How often the background freeze thread rewrites frozen values.
 const FREEZE_INTERVAL: Duration = Duration::from_millis(40);
@@ -1383,6 +1383,8 @@ struct CheatuApp {
     sig_pending: Option<Receiver<cheat_table::BgSignature>>,
     /// The pointer scan window, while open.
     pointer_window: Option<PointerWindow>,
+    /// The "New cheat" wizard, while open.
+    wizard: Option<WizardWindow>,
 
     // Background freeze.
     freeze_state: Arc<Mutex<FreezeShared>>,
@@ -2204,6 +2206,9 @@ impl eframe::App for CheatuApp {
         if let Some(w) = &mut self.pointer_window {
             w.shutdown();
         }
+        if let Some(mut w) = self.wizard.take() {
+            w.shutdown();
+        }
     }
 
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
@@ -2243,6 +2248,7 @@ impl eframe::App for CheatuApp {
         // Row to make an AoB signature for / to pointer scan.
         let mut do_signature: Option<usize> = None;
         let mut do_ptr_scan: Option<usize> = None;
+        let mut do_wizard = false;
         // Results column header the user clicked, applied once the table has
         // let go of `self.display`.
         let mut new_res_sort: Option<ResSort> = None;
@@ -2273,6 +2279,17 @@ impl eframe::App for CheatuApp {
                     if ui.button("Select process…").clicked() {
                         do_refresh_procs = true;
                         self.show_picker = true;
+                    }
+                    if ui
+                        .add_enabled(self.attached.is_some(), egui::Button::new("New cheat…"))
+                        .on_hover_text(
+                            "Step by step: find a value, make it survive game restarts, \
+                             and add it to the cheat table",
+                        )
+                        .on_disabled_hover_text("Attach to a process first.")
+                        .clicked()
+                    {
+                        do_wizard = true;
                     }
                     // Attach failed for lack of ptrace rights: offer to relaunch
                     // elevated and re-attach to the same target in one click.
@@ -3433,6 +3450,41 @@ impl eframe::App for CheatuApp {
             }
         }
 
+        // ---- Cheat wizard --------------------------------------------------
+        if do_wizard && self.wizard.is_none() {
+            if let Some((pid, name)) = self.attached.clone() {
+                match WizardWindow::new(pid, name) {
+                    Ok(w) => self.wizard = Some(w),
+                    Err(e) => self.status = format!("Cannot start the wizard: {e}."),
+                }
+            }
+        }
+        if let Some(mut w) = self.wizard.take() {
+            w.set_pause(self.pause_while_scanning);
+            for event in w.show(ctx) {
+                match event {
+                    WizardEvent::Save(entry) => {
+                        self.status = format!(
+                            "Added \"{}\" ({}) to the cheat table.",
+                            entry.description, entry.address
+                        );
+                        self.saved.push(GuiEntry::new(entry, false));
+                    }
+                    // Follow the wizard to the restarted game, so the cheat
+                    // table re-resolves there.
+                    WizardEvent::Reattached(pid) if self.scanning => {
+                        self.status = format!(
+                            "The game restarted as pid {pid}; attach to it once the scan is done."
+                        );
+                    }
+                    WizardEvent::Reattached(pid) => self.attach(pid),
+                }
+            }
+            if w.is_open() {
+                self.wizard = Some(w);
+            }
+        }
+
         if let Some((pid, name)) = self.attach_offer.clone() {
             let mut close = false;
             egui::Window::new("Attach to the table's process?")
@@ -3609,6 +3661,7 @@ impl eframe::App for CheatuApp {
             || self.aob_pending.is_some()
             || self.sig_pending.is_some()
             || self.pointer_window.as_ref().is_some_and(|w| w.busy())
+            || self.wizard.as_ref().is_some_and(|w| w.needs_repaint())
             || self.mode == AppMode::RpgMaker
         {
             ctx.request_repaint_after(Duration::from_millis(120));
