@@ -27,9 +27,9 @@
 
 | Crate | Purpose |
 |-------|---------|
-| `cheatu-core` | The engine: process listing, memory maps, memory read/write, typed scan values, the first/next scan algorithm, and privilege helpers. UI-agnostic; the OS-specific parts live in `src/sys/{linux,macos}.rs`. |
+| `cheatu-core` | The engine: process listing, memory maps, memory read/write, typed scan values, the first/next scan algorithm, address expressions (`addr_expr`), cheat table files (`table`), the pointer scanner (`pointer_scan`), AoB signatures (`signature`), and privilege helpers. UI-agnostic; the OS-specific parts live in `src/sys/{linux,macos}.rs`. |
 | `cheatu-cli`  | The `cheatu` command-line REPL. |
-| `cheatu-gui`  | The `cheatu-gui` graphical app. |
+| `cheatu-gui`  | The `cheatu-gui` graphical app; the cheat wizard is a state machine without egui (`wizard.rs`) plus its window (`wizard_ui.rs`). |
 | `cheatu-inject` | The RPG Maker MV/MZ (NW.js) JavaScript-injection backend. |
 
 ## Operating-system backends

@@ -35,6 +35,9 @@ a native GUI — plus a dedicated, stable backend for RPG Maker MV/MZ games.
   runs identically on **Wayland and Xorg**, under **KDE, GNOME, and standalone
   window managers**.
 - ⌨️ **scanmem-style CLI** — a scriptable REPL for people who live in a terminal.
+- 📋 **Cheat tables, pointer scanner and wizard** — save and share cheats as
+  TOML with addresses that survive restarts (module offsets, pointer chains,
+  byte patterns); a guided "New cheat…" wizard does the whole flow for you.
 - ❓ **"Any" type search** — don't know if it's an int, float, or double? Scan
   every common width at once; each hit reports what it really is.
 - 🎮 **Steam Play / Proton aware** — the process picker highlights Wine/Proton
