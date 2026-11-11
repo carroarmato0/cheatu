@@ -6,22 +6,30 @@
 // Don't spawn a console window on the odd chance this is cross-built for Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cheat_table;
+mod file_dialog;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cheatu_core::process::ProcInfo;
 use cheatu_core::scan::{
     address_hint, AddrHint, Confidence, FirstScan, NextScan, ScanProgress, Scanner, ANY_TYPES,
 };
+use cheatu_core::table::{self, CheatTable};
 use cheatu_core::{
     human_bytes, list_processes, privilege, probe_address, read_maps, region_for, Mem,
     ProbeOutcome, ScanType, ScanValue,
 };
+use cheatu_core::{AddrExpr, LiveSource, MemSource};
 use cheatu_inject::{agent, detect_dir, find_rpgmaker_games, scan_dir, Engine, FoundGame};
+
+use cheat_table::GuiEntry;
+use file_dialog::FileDialog;
 
 /// How often the background freeze thread rewrites frozen values.
 const FREEZE_INTERVAL: Duration = Duration::from_millis(40);
@@ -47,7 +55,28 @@ struct FreezeShared {
     pid: i32,
     /// Addresses to hold, with the exact value to write.
     items: Vec<(u64, ScanValue)>,
+    /// Addresses the thread could not write to since the UI last looked.
+    /// The UI re-resolves the entries behind them.
+    failed: Vec<u64>,
 }
+
+/// The process's memory map is re-read at most this often for resolving
+/// address expressions.
+const REGIONS_REFRESH: Duration = Duration::from_secs(1);
+
+/// File extension of cheat tables.
+const TABLE_EXT: &str = "toml";
+
+/// What the open file dialog is for.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum DialogPurpose {
+    OpenTable,
+    SaveTable,
+}
+
+/// A background `aob(...)` resolve: entry id, the expression it resolved,
+/// the address a write had failed at (if that triggered it), the result.
+type AobResult = (u64, AddrExpr, Option<u64>, Result<u64, String>);
 
 /// Cap on how many candidate rows we render at once (the table is virtualized,
 /// but building the snapshot for millions of hits would still be wasteful).
@@ -427,15 +456,6 @@ fn hint_tooltip(h: &AddrHint) -> &'static str {
         (Confidence::Neutral, _) => "Could be the real value or a copy — region is inconclusive.",
         _ => "Heuristic guess from the address's memory region and type.",
     }
-}
-
-/// One entry in the bottom "cheat table".
-struct SavedEntry {
-    desc: String,
-    addr: u64,
-    ty: ScanType,
-    value_text: String,
-    frozen: bool,
 }
 
 /// Result of a background scan, handed back to the UI thread.
@@ -1337,7 +1357,22 @@ struct CheatuApp {
     probe_results: HashMap<u64, ProbeOutcome>,
 
     // Cheat table.
-    saved: Vec<SavedEntry>,
+    saved: Vec<GuiEntry>,
+    /// Reads target memory for address expressions; one per attached process.
+    live: Option<LiveSource>,
+    /// When `live`'s memory map was last re-read.
+    live_refreshed: Option<Instant>,
+    /// The one `aob(...)` resolve running in the background.
+    aob_pending: Option<Receiver<AobResult>>,
+    /// File the table was last opened from or saved to.
+    table_path: Option<PathBuf>,
+    /// `process` of the opened table, saved again when nothing is attached.
+    table_process: Option<String>,
+    /// Folder the file dialog starts in next time.
+    last_table_dir: Option<PathBuf>,
+    file_dialog: Option<(DialogPurpose, FileDialog)>,
+    /// After opening a table: offer to attach to this (pid, name).
+    attach_offer: Option<(i32, String)>,
 
     // Background freeze.
     freeze_state: Arc<Mutex<FreezeShared>>,
@@ -1374,6 +1409,15 @@ impl CheatuApp {
                 self.display.clear();
                 self.result_count = 0;
                 self.status = format!("Attached to pid {pid}.");
+                self.live = LiveSource::open(pid).ok();
+                self.live_refreshed = Some(Instant::now());
+                // Addresses of the previous process mean nothing here; drop
+                // them so nothing is written before the entries re-resolve.
+                for e in &mut self.saved {
+                    e.resolved = Err("not resolved yet".into());
+                    e.write_failed = false;
+                    e.needs_resolve = true;
+                }
             }
             Err(e) => {
                 // A permission error on a same-user process means we lack ptrace
@@ -1714,7 +1758,12 @@ impl CheatuApp {
         let mut seen = std::collections::HashSet::new();
         self.display
             .iter()
-            .filter(|d| !self.saved.iter().any(|e| e.frozen && e.addr == d.addr))
+            .filter(|d| {
+                !self
+                    .saved
+                    .iter()
+                    .any(|e| e.entry.frozen && e.resolved == Ok(d.addr))
+            })
             .filter(|d| seen.insert(d.addr))
             .take(PROBE_BATCH_MAX)
             .map(|d| (d.addr, d.prev.ty().size()))
@@ -1760,8 +1809,21 @@ impl CheatuApp {
                     cur_pid = pid;
                 }
                 if let Some(m) = &mem {
-                    for (addr, value) in &items {
-                        let _ = m.write_at(*addr, &value.to_ne_bytes());
+                    let failed: Vec<u64> = items
+                        .iter()
+                        .filter(|(addr, value)| m.write_at(*addr, &value.to_ne_bytes()).is_err())
+                        .map(|(addr, _)| *addr)
+                        .collect();
+                    if !failed.is_empty() {
+                        let mut s = state.lock().unwrap();
+                        // Only for the process the items were meant for.
+                        if s.pid == pid {
+                            for a in failed {
+                                if !s.failed.contains(&a) {
+                                    s.failed.push(a);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1769,18 +1831,253 @@ impl CheatuApp {
     }
 
     /// Publish the current set of frozen values to the background thread.
+    /// Entries that do not resolve are left out: never written.
     fn sync_freezes(&mut self) {
         let pid = self.attached.as_ref().map(|(p, _)| *p).unwrap_or(0);
-        let items: Vec<(u64, ScanValue)> = self
-            .saved
-            .iter()
-            .filter(|e| e.frozen)
-            .filter_map(|e| e.ty.parse(&e.value_text).map(|v| (e.addr, v)))
-            .collect();
+        let items = cheat_table::freeze_items(&self.saved);
         if let Ok(mut s) = self.freeze_state.lock() {
+            if s.pid != pid {
+                s.failed.clear();
+            }
             s.pid = pid;
             s.items = items;
         }
+    }
+
+    /// The live source with a memory map at most [`REGIONS_REFRESH`] old.
+    fn fresh_live(&mut self) -> Option<&LiveSource> {
+        let live = self.live.as_mut()?;
+        let stale = self
+            .live_refreshed
+            .is_none_or(|t| t.elapsed() >= REGIONS_REFRESH);
+        if stale {
+            // On failure keep the old map; resolving reports what is missing.
+            let _ = live.refresh_regions();
+            self.live_refreshed = Some(Instant::now());
+        }
+        self.live.as_ref()
+    }
+
+    /// Re-resolve the cheat table's address expressions that are due:
+    /// module/pointer expressions here on the schedule in
+    /// [`cheat_table::due_for_resolve`], `aob(...)` ones only on demand and
+    /// on a background thread, one at a time.
+    fn resolve_entries(&mut self) {
+        let now = Instant::now();
+
+        // A finished background AoB resolve.
+        if let Some(rx) = &self.aob_pending {
+            match rx.try_recv() {
+                Ok((id, expr, failed_at, r)) => {
+                    self.aob_pending = None;
+                    // Dropped if the row was removed or its expression edited.
+                    if let Some(e) = self
+                        .saved
+                        .iter_mut()
+                        .find(|e| e.id == id && e.entry.address == expr)
+                    {
+                        cheat_table::apply_resolve(e, r, now, failed_at);
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.aob_pending = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Writes the freeze thread could not make.
+        let failed = self
+            .freeze_state
+            .lock()
+            .map(|mut s| std::mem::take(&mut s.failed))
+            .unwrap_or_default();
+        cheat_table::mark_write_failures(&mut self.saved, &failed);
+
+        let Some(pid) = self.attached.as_ref().map(|(p, _)| *p) else {
+            return;
+        };
+        if self.live.is_none() {
+            return;
+        }
+
+        let due: Vec<usize> = (0..self.saved.len())
+            .filter(|&i| {
+                let e = &self.saved[i];
+                !e.uses_aob()
+                    && (e.needs_resolve || cheat_table::due_for_resolve(e, now, e.write_failed))
+            })
+            .collect();
+        if !due.is_empty() {
+            self.fresh_live();
+            if let Some(live) = &self.live {
+                for i in due {
+                    let e = &mut self.saved[i];
+                    let failed_at = if e.write_failed {
+                        e.resolved.as_ref().ok().copied()
+                    } else {
+                        None
+                    };
+                    let r = e.entry.address.resolve(live).map_err(|err| err.to_string());
+                    cheat_table::apply_resolve(e, r, now, failed_at);
+                }
+            }
+        }
+
+        if self.aob_pending.is_none() {
+            if let Some(e) = self
+                .saved
+                .iter_mut()
+                .find(|e| e.uses_aob() && (e.needs_resolve || e.write_failed))
+            {
+                let failed_at = if e.write_failed {
+                    e.resolved.as_ref().ok().copied()
+                } else {
+                    None
+                };
+                // Picked up: don't start it again while it runs.
+                e.needs_resolve = false;
+                e.write_failed = false;
+                let (id, expr) = (e.id, e.entry.address.clone());
+                let (tx, rx) = mpsc::channel();
+                self.aob_pending = Some(rx);
+                std::thread::spawn(move || {
+                    let r = LiveSource::open(pid)
+                        .map_err(|err| format!("cannot read process: {err}"))
+                        .and_then(|src| expr.resolve(&src).map_err(|err| err.to_string()));
+                    let _ = tx.send((id, expr, failed_at, r));
+                });
+            }
+        }
+    }
+
+    /// Why the table can't be saved as it is, if it can't.
+    fn save_blocker(&self) -> Option<String> {
+        self.saved.iter().enumerate().find_map(|(i, e)| {
+            let name = if e.entry.description.is_empty() {
+                format!("row {}", i + 1)
+            } else {
+                format!("\"{}\"", e.entry.description)
+            };
+            if e.parse_error.is_some() {
+                Some(format!("Fix the address expression of {name} first."))
+            } else if !cheat_table::savable_value(e.entry.ty, &e.entry.value) {
+                Some(format!(
+                    "The value of {name} is not a valid {}.",
+                    e.entry.ty.label()
+                ))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Write the table to `path`, with `process` = the attached process.
+    fn save_table(&mut self, path: PathBuf) {
+        if let Some(why) = self.save_blocker() {
+            self.status = format!("Not saved: {why}");
+            return;
+        }
+        let process = self
+            .attached
+            .as_ref()
+            .map(|(_, name)| name.clone())
+            .or_else(|| self.table_process.clone());
+        let t = CheatTable {
+            process: process.clone(),
+            entries: self.saved.iter().map(|e| e.entry.clone()).collect(),
+        };
+        match table::save(&t, &path) {
+            Ok(()) => {
+                self.status = format!("Saved {} entries to {}.", t.entries.len(), path.display());
+                self.table_process = process;
+                self.table_path = Some(path);
+            }
+            Err(e) => self.status = format!("Could not save {}: {e}", path.display()),
+        }
+    }
+
+    /// Open the file dialog for `purpose`.
+    fn open_file_dialog(&mut self, purpose: DialogPurpose) {
+        let home = home_dir();
+        let start = file_dialog::start_dir(self.last_table_dir.as_deref(), &home);
+        let dialog = match purpose {
+            DialogPurpose::OpenTable => FileDialog::new(
+                file_dialog::Mode::Open,
+                "Open cheat table",
+                TABLE_EXT,
+                start,
+                home,
+                "",
+            ),
+            DialogPurpose::SaveTable => {
+                if let Some(why) = self.save_blocker() {
+                    self.status = format!("Not saved: {why}");
+                    return;
+                }
+                let name = self
+                    .table_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .or_else(|| {
+                        self.attached
+                            .as_ref()
+                            .map(|(_, n)| format!("{n}.{TABLE_EXT}"))
+                    })
+                    .unwrap_or_else(|| format!("cheats.{TABLE_EXT}"));
+                FileDialog::new(
+                    file_dialog::Mode::Save,
+                    "Save cheat table",
+                    TABLE_EXT,
+                    start,
+                    home,
+                    &name,
+                )
+            }
+        };
+        self.file_dialog = Some((purpose, dialog));
+    }
+
+    /// Replace the table with the file's. All freezes start off and target
+    /// memory is not touched; the entries resolve on the next frame.
+    fn open_table_file(&mut self, path: PathBuf) {
+        let t = match cheat_table::open_table(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = format!("Could not open {}: {e}", path.display());
+                return;
+            }
+        };
+        let n = t.entries.len();
+        self.saved = t.entries;
+        self.table_path = Some(path.clone());
+        self.table_process = t.process.clone();
+        self.attach_offer = None;
+        let mut status = format!(
+            "Opened {n} entries from {} — all freezes off.",
+            path.display()
+        );
+        match (&t.process, &self.attached) {
+            (Some(want), None) => {
+                let procs = list_processes();
+                match cheat_table::processes_named(&procs, want).as_slice() {
+                    [] => status.push_str(&format!(" {want} is not running.")),
+                    [pid] => self.attach_offer = Some((*pid, want.clone())),
+                    _ => {
+                        // Several: let the user pick, filtered to the name.
+                        self.procs = procs;
+                        self.proc_filter = want.clone();
+                        self.show_picker = true;
+                    }
+                }
+            }
+            (Some(want), Some((_, have))) if want != have => {
+                status = format!(
+                    "Warning: this table was made for {want}, but {have} is attached. {status}"
+                );
+            }
+            _ => {}
+        }
+        self.status = status;
     }
 }
 
@@ -1791,6 +2088,7 @@ impl eframe::App for CheatuApp {
         self.ensure_freeze_thread();
         self.poll_scan();
         self.poll_probe();
+        self.resolve_entries();
         self.sync_freezes();
 
         // Re-attach to the target we were relaunched (elevated) for.
@@ -1811,6 +2109,8 @@ impl eframe::App for CheatuApp {
         let mut add_to_table: Vec<(u64, ScanType)> = Vec::new();
         let mut remove_from_table: Vec<usize> = Vec::new();
         let mut clear_table = false;
+        let mut open_dialog: Option<DialogPurpose> = None;
+        let mut quick_save = false;
         // Index of the cheat table row whose value should be written once.
         let mut do_set: Option<usize> = None;
         // Results column header the user clicked, applied once the table has
@@ -1948,6 +2248,37 @@ impl eframe::App for CheatuApp {
                     ui.horizontal(|ui| {
                         ui.heading("Cheat table");
                         if ui
+                            .small_button("📂 Open…")
+                            .on_hover_text("Open a cheat table file (all freezes start off)")
+                            .clicked()
+                        {
+                            open_dialog = Some(DialogPurpose::OpenTable);
+                        }
+                        let save_hint = match &self.table_path {
+                            Some(p) => format!("Save to {}", p.display()),
+                            None => "Save to a new file".to_string(),
+                        };
+                        if ui
+                            .add_enabled(
+                                !self.saved.is_empty(),
+                                egui::Button::new("💾 Save").small(),
+                            )
+                            .on_hover_text(save_hint)
+                            .clicked()
+                        {
+                            quick_save = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.saved.is_empty(),
+                                egui::Button::new("Save as…").small(),
+                            )
+                            .on_hover_text("Save to a file of your choice")
+                            .clicked()
+                        {
+                            open_dialog = Some(DialogPurpose::SaveTable);
+                        }
+                        if ui
                             .add_enabled(
                                 !self.saved.is_empty(),
                                 egui::Button::new("🗑 Clear all").small(),
@@ -1958,9 +2289,18 @@ impl eframe::App for CheatuApp {
                             clear_table = true;
                         }
                     });
+                    if let Some(p) = &self.table_path {
+                        ui.label(
+                            egui::RichText::new(p.display().to_string())
+                                .monospace()
+                                .weak()
+                                .small(),
+                        );
+                    }
                     ui.label(
                         egui::RichText::new(
-                            "One row per address. Tick ❄ to freeze; edit Value to set it.",
+                            "Tick ❄ to freeze; edit Value to set it. The address is an \
+                             expression, e.g. [\"game.exe\"+0x1a2b30]+0x48.",
                         )
                         .weak()
                         .small(),
@@ -1970,47 +2310,68 @@ impl eframe::App for CheatuApp {
                     if self.saved.is_empty() {
                         ui.label(egui::RichText::new("No saved addresses yet.").weak());
                         ui.label(
-                            egui::RichText::new("Use the “+” button on a scan result.")
-                                .weak()
-                                .small(),
+                            egui::RichText::new(
+                                "Use the “+” button on a scan result, or Open a table.",
+                            )
+                            .weak()
+                            .small(),
                         );
                     }
 
+                    let attached = self.attached.is_some();
+                    let aob_busy = self.aob_pending.is_some();
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for (i, entry) in self.saved.iter_mut().enumerate() {
-                                // One entry = one line, Cheat Engine style:
-                                //   [❄] description  0xADDR  ty  [value] [Set] [🗑]  = current
+                                // Two lines per entry:
+                                //   [❄] description  ty  [value] [Set] [⟳] [🗑]
+                                //   [expression]  → 0xRESOLVED = current
                                 // The live value goes last because it changes
                                 // constantly: anything after it would jump
                                 // around as its width changed.
+                                if i > 0 {
+                                    ui.separator();
+                                }
                                 ui.horizontal(|ui| {
-                                    ui.checkbox(&mut entry.frozen, "").on_hover_text("Freeze");
+                                    ui.checkbox(&mut entry.entry.frozen, "")
+                                        .on_hover_text("Freeze");
+                                    if entry.frozen_when_saved && !entry.entry.frozen {
+                                        ui.label(
+                                            egui::RichText::new("frozen when saved").weak().small(),
+                                        )
+                                        .on_hover_text(
+                                            "This entry was frozen when the table was saved. \
+                                             Freezes are off after opening a table; tick ❄ to \
+                                             freeze it again.",
+                                        );
+                                    }
                                     ui.add(
-                                        egui::TextEdit::singleline(&mut entry.desc)
+                                        egui::TextEdit::singleline(&mut entry.entry.description)
                                             .hint_text("description")
                                             .desired_width(96.0),
                                     );
-                                    ui.monospace(format!("0x{:012x}", entry.addr));
                                     ui.label(
-                                        egui::RichText::new(entry.ty.friendly_label())
+                                        egui::RichText::new(entry.entry.ty.friendly_label())
                                             .weak()
                                             .small(),
                                     );
                                     ui.add(
-                                        egui::TextEdit::singleline(&mut entry.value_text)
+                                        egui::TextEdit::singleline(&mut entry.entry.value)
                                             .desired_width(64.0),
                                     );
-                                    let valid = entry.ty.parse(&entry.value_text).is_some();
+                                    let valid = entry.entry.ty.parse(&entry.entry.value).is_some();
+                                    let resolved = entry.resolved.is_ok();
                                     if ui
                                         .add_enabled(
-                                            valid && !entry.frozen,
+                                            valid && resolved && !entry.entry.frozen,
                                             egui::Button::new("Set").small(),
                                         )
                                         .on_hover_text("Write this value to the address once")
-                                        .on_disabled_hover_text(if entry.frozen {
+                                        .on_disabled_hover_text(if entry.entry.frozen {
                                             "Frozen — this value is already written continuously."
+                                        } else if !resolved {
+                                            "The address does not resolve."
                                         } else {
                                             "Not a valid value for this type."
                                         })
@@ -2018,17 +2379,92 @@ impl eframe::App for CheatuApp {
                                     {
                                         do_set = Some(i);
                                     }
+                                    let busy = entry.uses_aob() && aob_busy;
+                                    if ui
+                                        .add_enabled(
+                                            attached && !busy,
+                                            egui::Button::new("⟳").small(),
+                                        )
+                                        .on_hover_text("Re-resolve the address expression now")
+                                        .on_disabled_hover_text(if busy {
+                                            "An aob() search is already running."
+                                        } else {
+                                            "Attach to a process first."
+                                        })
+                                        .clicked()
+                                    {
+                                        entry.needs_resolve = true;
+                                    }
                                     if ui.small_button("🗑").on_hover_text("remove").clicked() {
                                         remove_from_table.push(i);
                                     }
-                                    let cur = scanner_ref
-                                        .and_then(|s| read_current(s, entry.addr, entry.ty))
-                                        .unwrap_or_else(|| "n/a".to_string());
-                                    ui.label(
-                                        egui::RichText::new(format!("= {cur}")).monospace().weak(),
-                                    )
-                                    .on_hover_text("The value in the game right now");
                                 });
+                                ui.horizontal(|ui| {
+                                    let resp = ui.add(
+                                        egui::TextEdit::singleline(&mut entry.expr_text)
+                                            .font(egui::TextStyle::Monospace)
+                                            .hint_text("address expression")
+                                            .desired_width(
+                                                (ui.available_width() - 150.0).clamp(160.0, 420.0),
+                                            ),
+                                    );
+                                    if resp.changed() {
+                                        entry.parse_error = AddrExpr::parse(&entry.expr_text)
+                                            .err()
+                                            .map(|e| e.to_string());
+                                    }
+                                    // Applied when editing ends, not per keystroke:
+                                    // a half-typed address must never be written to.
+                                    if resp.lost_focus() {
+                                        if let Ok(expr) = AddrExpr::parse(&entry.expr_text) {
+                                            if expr != entry.entry.address {
+                                                entry.entry.address = expr;
+                                                entry.resolved = Err("not resolved yet".into());
+                                                entry.needs_resolve = true;
+                                            }
+                                        }
+                                    }
+                                    if !attached {
+                                        ui.label(
+                                            egui::RichText::new("not attached").weak().small(),
+                                        );
+                                    } else {
+                                        match &entry.resolved {
+                                            Ok(addr) => {
+                                                ui.monospace(format!("→ 0x{addr:012x}"));
+                                                let cur = scanner_ref
+                                                    .and_then(|s| {
+                                                        read_current(s, *addr, entry.entry.ty)
+                                                    })
+                                                    .unwrap_or_else(|| "n/a".to_string());
+                                                ui.label(
+                                                    egui::RichText::new(format!("= {cur}"))
+                                                        .monospace()
+                                                        .weak(),
+                                                )
+                                                .on_hover_text("The value in the game right now");
+                                            }
+                                            Err(e) => {
+                                                let text = if entry.uses_aob()
+                                                    && aob_busy
+                                                    && e == "not resolved yet"
+                                                {
+                                                    "searching…".to_string()
+                                                } else {
+                                                    e.clone()
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(text)
+                                                        .small()
+                                                        .color(err_color(ui)),
+                                                );
+                                            }
+                                        }
+                                    }
+                                });
+                                if let Some(e) = &entry.parse_error {
+                                    ui.label(egui::RichText::new(e).small().color(err_color(ui)));
+                                }
                             }
                         });
                 });
@@ -2417,7 +2853,9 @@ impl eframe::App for CheatuApp {
                                 add_to_table.push((d.addr, ty));
                             }
                             if enable_probe {
-                                let frozen = saved.iter().any(|e| e.addr == d.addr && e.frozen);
+                                let frozen = saved
+                                    .iter()
+                                    .any(|e| e.entry.frozen && e.resolved == Ok(d.addr));
                                 let btn =
                                     ui.add_enabled(!probe_busy && !frozen, egui::Button::new("🧪"));
                                 let btn = if frozen {
@@ -2767,6 +3205,55 @@ impl eframe::App for CheatuApp {
             save_theme(theme);
         }
 
+        // ---- Cheat table file dialog and attach offer --------------------
+        if quick_save {
+            match self.table_path.clone() {
+                Some(path) => self.save_table(path),
+                None => open_dialog = Some(DialogPurpose::SaveTable),
+            }
+        }
+        if let Some(purpose) = open_dialog {
+            self.open_file_dialog(purpose);
+        }
+        if let Some((purpose, dialog)) = &mut self.file_dialog {
+            let purpose = *purpose;
+            if let Some(outcome) = dialog.show(ctx) {
+                self.last_table_dir = Some(dialog.dir().to_path_buf());
+                self.file_dialog = None;
+                if let file_dialog::Outcome::Picked(path) = outcome {
+                    match purpose {
+                        DialogPurpose::OpenTable => self.open_table_file(path),
+                        DialogPurpose::SaveTable => self.save_table(path),
+                    }
+                }
+            }
+        }
+        if let Some((pid, name)) = self.attach_offer.clone() {
+            let mut close = false;
+            egui::Window::new("Attach to the table's process?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "This table was made for {name}, which is running as pid {pid}."
+                    ));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Attach").clicked() {
+                            do_attach = Some(pid);
+                            close = true;
+                        }
+                        if ui.button("Not now").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.attach_offer = None;
+            }
+        }
+
         // ---- Apply deferred actions ------------------------------------
         if do_refresh_procs {
             self.procs = list_processes();
@@ -2812,21 +3299,31 @@ impl eframe::App for CheatuApp {
         }
         for (addr, ty) in add_to_table {
             // Avoid duplicates (same address + type).
-            if self.saved.iter().any(|e| e.addr == addr && e.ty == ty) {
+            if self
+                .saved
+                .iter()
+                .any(|e| e.resolved == Ok(addr) && e.entry.ty == ty)
+            {
                 continue;
             }
-            let value_text = self
+            // `"module"+offset` when the address is in a module's image, so
+            // the entry still works after the game restarts.
+            let mut entry = match self.fresh_live() {
+                Some(live) => cheat_table::entry_for_address(live.regions(), addr, ty),
+                None => cheat_table::entry_for_address(&[], addr, ty),
+            };
+            if let Some(v) = self
                 .scanner
                 .as_ref()
-                .and_then(|s| read_current(s, addr, ty))
-                .unwrap_or_default();
-            self.saved.push(SavedEntry {
-                desc: String::new(),
-                addr,
-                ty,
-                value_text,
-                frozen: false,
-            });
+                .and_then(|s| s.read_typed(addr, ty).ok())
+            {
+                entry.value = cheat_table::value_text(&v);
+            }
+            let mut row = GuiEntry::new(entry, false);
+            row.resolved = Ok(addr);
+            row.last_resolve = Instant::now();
+            row.needs_resolve = false;
+            self.saved.push(row);
         }
         if let Some(col) = new_res_sort.filter(|c| *c != self.res_sort) {
             self.res_sort = col;
@@ -2836,17 +3333,23 @@ impl eframe::App for CheatuApp {
             // sync_freezes() runs each frame, so dropping the rows also lifts
             // their freezes.
             self.saved.clear();
+            self.table_path = None;
+            self.table_process = None;
             self.status = "Cheat table cleared.".into();
         }
         // A one-shot write. Freezing writes continuously; this is for the far
         // more common "set it once and see what happens".
+        // Only ever to a resolved address.
         if let Some(entry) = do_set.and_then(|i| self.saved.get(i)) {
-            self.status = match (&self.scanner, entry.ty.parse(&entry.value_text)) {
-                (Some(scanner), Some(v)) => match scanner.write_value(entry.addr, &v) {
-                    Ok(()) => format!("Wrote {v} to 0x{:x}.", entry.addr),
-                    Err(e) => format!("Write to 0x{:x} failed: {e}", entry.addr),
+            let value = entry.entry.ty.parse(&entry.entry.value);
+            self.status = match (&self.scanner, &entry.resolved, value) {
+                (None, _, _) => "Attach to a process first.".into(),
+                (_, Err(e), _) => format!("Not written: the address does not resolve ({e})."),
+                (_, _, None) => "Not a valid value for this type.".into(),
+                (Some(scanner), Ok(addr), Some(v)) => match scanner.write_value(*addr, &v) {
+                    Ok(()) => format!("Wrote {v} to 0x{addr:x}."),
+                    Err(e) => format!("Write to 0x{addr:x} failed: {e}"),
                 },
-                _ => "Attach to a process first.".into(),
             };
         }
         // Remove in reverse so indices stay valid.
@@ -2893,7 +3396,11 @@ impl eframe::App for CheatuApp {
         }
 
         // Keep current values (scanner results, or the RPG Maker snapshot) live.
-        if self.scanner.is_some() || self.scanning || self.mode == AppMode::RpgMaker {
+        if self.scanner.is_some()
+            || self.scanning
+            || self.aob_pending.is_some()
+            || self.mode == AppMode::RpgMaker
+        {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
     }
@@ -3056,13 +3563,18 @@ mod tests {
         assert_eq!(app.probe_all_targets().len(), PROBE_BATCH_MAX);
         assert_eq!(app.probe_all_targets()[0], (0x1000, 4));
 
-        app.saved.push(SavedEntry {
-            desc: String::new(),
-            addr: 0x1000,
-            ty: ScanType::I32,
-            value_text: "1".into(),
-            frozen: true,
-        });
+        let mut frozen = GuiEntry::new(
+            cheatu_core::table::TableEntry {
+                description: String::new(),
+                address: AddrExpr::parse("0x1000").unwrap(),
+                ty: ScanType::I32,
+                value: "1".into(),
+                frozen: true,
+            },
+            false,
+        );
+        frozen.resolved = Ok(0x1000);
+        app.saved.push(frozen);
         let targets = app.probe_all_targets();
         assert_eq!(targets.len(), PROBE_BATCH_MAX, "the cap still fills up");
         assert!(
