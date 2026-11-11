@@ -6,7 +6,7 @@
 //!   * read and write another process's memory ([`mem`])
 //!   * represent typed scan values ([`value`])
 //!   * run first/next scans and keep candidate addresses ([`scan`])
-//!   * build a disk-backed pointer map for pointer scans ([`pointer_scan`])
+//!   * find pointer chains to an address, save and filter them ([`pointer_scan`])
 //!   * check for / request elevated privileges ([`privilege`])
 //!
 //! On Linux, reading another process's memory requires either running as root

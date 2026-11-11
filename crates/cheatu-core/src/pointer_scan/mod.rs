@@ -3,13 +3,21 @@
 //!
 //! The first step is a [`PointerMap`]: a snapshot of every aligned value in
 //! writable memory that points into readable memory, sorted by value on disk.
+//! [`find_chains`] then searches it backwards from a target, and
+//! [`PtrResults`] saves the chains and filters them after a restart.
 
 mod map;
+mod results;
+mod search;
+
+use serde::{Deserialize, Serialize};
 
 pub use map::PointerMap;
+pub use results::PtrResults;
+pub use search::{find_chains, ChainSearch, PointerChain};
 
 /// Limits for a pointer scan.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PtrScanSettings {
     /// Maximum number of `[…]` dereference steps in a chain.
     pub max_depth: usize,

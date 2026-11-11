@@ -684,6 +684,7 @@ dependencies = [
  "memmap2",
  "proptest",
  "serde",
+ "serde_json",
  "toml",
 ]
 
