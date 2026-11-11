@@ -19,10 +19,11 @@ pub mod mem;
 pub mod privilege;
 pub mod process;
 pub mod scan;
+pub mod source;
 mod sys;
 pub mod value;
 
-pub use addr_expr::{AddrExpr, Expr, ParseError};
+pub use addr_expr::{AddrExpr, Expr, ParseError, ResolveError};
 pub use maps::{
     module_base, module_containing, module_name, read_maps, region_for, MemoryRegion, ModuleError,
     RegionKind,
@@ -33,4 +34,5 @@ pub use scan::{
     address_hint, parse_aob, parse_range, AddrHint, Confidence, FirstScan, NextScan, ScanProgress,
     Scanner, ANY_TYPES,
 };
+pub use source::{LiveSource, MemSource};
 pub use value::{ScanType, ScanValue};

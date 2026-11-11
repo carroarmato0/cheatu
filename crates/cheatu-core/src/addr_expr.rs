@@ -12,7 +12,9 @@
 
 use std::fmt;
 
+use crate::maps::{module_base, module_name, ModuleError};
 use crate::scan::parse_aob;
+use crate::source::MemSource;
 
 /// Longest accepted expression text, in characters. Together with the nesting
 /// limit this bounds the depth of the parsed tree.
@@ -102,6 +104,135 @@ fn is_static(e: &Expr) -> bool {
         Expr::Module(_) | Expr::Aob { .. } => true,
         Expr::Deref(inner) => is_static(inner),
         Expr::Add(l, _) | Expr::Sub(l, _) => is_static(l),
+    }
+}
+
+/// Why an expression could not be resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolveError {
+    Module(ModuleError),
+    /// The 8 bytes at this address could not be read.
+    Unreadable(u64),
+    /// The pattern did not match exactly once. `count` stops growing once it
+    /// is clear the match is not unique, so it may be a lower bound above 2.
+    AobCount {
+        pattern: String,
+        module: Option<String>,
+        count: usize,
+    },
+    BadPattern(String),
+}
+
+impl fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveError::Module(e) => e.fmt(f),
+            ResolveError::Unreadable(a) => write!(f, "pointer at {a:#x} unreadable"),
+            ResolveError::AobCount {
+                pattern,
+                module,
+                count,
+            } => {
+                write!(f, "aob(\"{pattern}\"")?;
+                if let Some(m) = module {
+                    write!(f, ", \"{m}\"")?;
+                }
+                write!(f, ") matched {count} times, must be unique")
+            }
+            ResolveError::BadPattern(p) => write!(f, "invalid aob pattern \"{p}\""),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+impl From<ModuleError> for ResolveError {
+    fn from(e: ModuleError) -> Self {
+        ResolveError::Module(e)
+    }
+}
+
+const AOB_CHUNK: usize = 4 * 1024 * 1024;
+/// Stop searching once this many matches are found (one is needed, the rest
+/// only prove non-uniqueness).
+const AOB_MAX_MATCHES: usize = 3;
+
+fn aob_matches_at(hay: &[u8], pat: &[Option<u8>]) -> bool {
+    hay.iter().zip(pat).all(|(h, p)| p.is_none_or(|b| b == *h))
+}
+
+fn resolve_aob(
+    pattern: &str,
+    module: Option<&str>,
+    src: &dyn MemSource,
+) -> Result<u64, ResolveError> {
+    let pat = parse_aob(pattern).ok_or_else(|| ResolveError::BadPattern(pattern.to_string()))?;
+    if let Some(m) = module {
+        module_base(src.regions(), m)?;
+    }
+    let overlap = pat.len() - 1;
+    let mut found: Vec<u64> = Vec::new();
+    let mut buf = vec![0u8; AOB_CHUNK + overlap];
+    'regions: for r in src.regions() {
+        if !r.read || module.is_some_and(|m| module_name(r) != Some(m)) {
+            continue;
+        }
+        let mut start = r.start;
+        while start < r.end {
+            // Candidate start positions in this chunk: [start, start + step).
+            // The extra `overlap` bytes only complete matches, so a match is
+            // attributed to exactly one chunk.
+            let step = ((r.end - start) as usize).min(AOB_CHUNK);
+            let want = (r.end - start).min((AOB_CHUNK + overlap) as u64) as usize;
+            if let Ok(n) = src.read(start, &mut buf[..want]) {
+                let hay = &buf[..n];
+                if hay.len() >= pat.len() {
+                    let last = (hay.len() - pat.len()).min(step - 1);
+                    for i in 0..=last {
+                        if aob_matches_at(&hay[i..], &pat) {
+                            found.push(start + i as u64);
+                            if found.len() >= AOB_MAX_MATCHES {
+                                break 'regions;
+                            }
+                        }
+                    }
+                }
+            }
+            start += step as u64;
+        }
+    }
+    match found.as_slice() {
+        [one] => Ok(*one),
+        _ => Err(ResolveError::AobCount {
+            pattern: pattern.to_string(),
+            module: module.map(str::to_string),
+            count: found.len(),
+        }),
+    }
+}
+
+fn resolve_expr(e: &Expr, src: &dyn MemSource) -> Result<u64, ResolveError> {
+    match e {
+        Expr::Num(n) => Ok(*n),
+        Expr::Module(name) => Ok(module_base(src.regions(), name)?),
+        Expr::Deref(inner) => {
+            let addr = resolve_expr(inner, src)?;
+            let mut b = [0u8; 8];
+            match src.read(addr, &mut b) {
+                Ok(8) => Ok(u64::from_le_bytes(b)),
+                _ => Err(ResolveError::Unreadable(addr)),
+            }
+        }
+        Expr::Aob { pattern, module } => resolve_aob(pattern, module.as_deref(), src),
+        Expr::Add(a, b) => Ok(resolve_expr(a, src)?.wrapping_add(resolve_expr(b, src)?)),
+        Expr::Sub(a, b) => Ok(resolve_expr(a, src)?.wrapping_sub(resolve_expr(b, src)?)),
+    }
+}
+
+impl AddrExpr {
+    /// Evaluate against a target. Arithmetic wraps at 64 bits.
+    pub fn resolve(&self, src: &dyn MemSource) -> Result<u64, ResolveError> {
+        resolve_expr(&self.0, src)
     }
 }
 
