@@ -26,7 +26,7 @@ fn live() -> LiveSource {
 /// Temp directories this process's pointer maps have left behind.
 fn leftover_dirs() -> Vec<String> {
     let prefix = format!("cheatu-ptrmap-{}-", std::process::id());
-    std::fs::read_dir(std::env::temp_dir())
+    std::fs::read_dir(PointerMap::temp_root())
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())

@@ -4,13 +4,16 @@
 //! A large target holds tens of millions of candidates, so the map lives on
 //! disk: records are sorted in memory in runs of `chunk_entries`, each run is
 //! written to a file, the runs are k-way merged into `map.bin`, and that file
-//! is memory-mapped for binary search. Everything lives in a private temp
-//! directory that is removed on drop and on every error path.
+//! is memory-mapped for binary search. Everything lives in a private (mode
+//! 0700) temp directory under [`PointerMap::temp_root`] that is removed on drop
+//! and on every error path; directories left by processes that died are swept
+//! when the next map is built.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -207,6 +210,20 @@ impl PointerMap {
         (a..n).map(record).take_while(move |&(v, _)| v < hi)
     }
 
+    /// Directory the pointer map's temp files go in: `/var/tmp` on Linux when
+    /// it is writable (it is disk-backed, while `/tmp` is often a RAM-backed
+    /// tmpfs and the map can take gigabytes), otherwise the system temp dir.
+    pub fn temp_root() -> PathBuf {
+        #[cfg(target_os = "linux")]
+        {
+            let writable = unsafe { libc::access(c"/var/tmp".as_ptr(), libc::W_OK | libc::X_OK) };
+            if writable == 0 {
+                return PathBuf::from("/var/tmp");
+            }
+        }
+        std::env::temp_dir()
+    }
+
     /// Whether `location` lies inside a module's image, so it can be named as
     /// `"module"+offset` across restarts.
     pub fn is_static(&self, location: u64) -> bool {
@@ -353,21 +370,29 @@ fn merge_group(runs: &[PathBuf], out: &Path, progress: &ScanProgress) -> io::Res
     Ok(written)
 }
 
-/// `temp_dir()/cheatu-ptrmap-<pid>-<n>/`, removed with everything in it on
-/// drop — including on early `?` returns from [`PointerMap::build`].
+/// `<temp root>/cheatu-ptrmap-<pid>-<n>/` (mode 0700), removed with everything
+/// in it on drop — including on early `?` returns from [`PointerMap::build`].
 struct TempDir(PathBuf);
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
+const DIR_PREFIX: &str = "cheatu-ptrmap-";
+
 impl TempDir {
     fn create() -> io::Result<TempDir> {
+        TempDir::create_in(&PointerMap::temp_root())
+    }
+
+    fn create_in(root: &Path) -> io::Result<TempDir> {
+        sweep_stale(root);
         let pid = std::process::id();
         loop {
             let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("cheatu-ptrmap-{pid}-{n}"));
-            match fs::create_dir(&path) {
+            let path = root.join(format!("{DIR_PREFIX}{pid}-{n}"));
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
                 Ok(()) => return Ok(TempDir(path)),
-                // Left over by an earlier process with the same pid.
+                // Left over by an earlier process with the same pid, or
+                // planted: never reused.
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
             }
@@ -382,5 +407,109 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The pid in a `cheatu-ptrmap-<pid>-<n>` directory name.
+fn dir_pid(name: &str) -> Option<i32> {
+    let (pid, n) = name.strip_prefix(DIR_PREFIX)?.split_once('-')?;
+    n.parse::<u64>().ok()?;
+    pid.parse().ok().filter(|&p| p > 0)
+}
+
+/// Whether no process with this pid exists.
+fn pid_gone(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// Remove pointer map directories under `root` left by processes that no
+/// longer exist (a crash or kill skips `Drop`). Only real directories owned by
+/// this user are touched, never links. Best effort: errors are ignored.
+fn sweep_stale(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let uid = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(dir_pid) else {
+            continue;
+        };
+        if pid as u32 == std::process::id() || !pid_gone(pid) {
+            continue;
+        }
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_dir() && m.uid() == uid => {
+                let _ = fs::remove_dir_all(&path);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cheatu-maptest-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn dir_is_private() {
+        let root = scratch("mode");
+        let dir = TempDir::create_in(&root).unwrap();
+        let mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dirs_of_dead_processes_are_swept() {
+        let root = scratch("sweep");
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let stale = root.join(format!("{DIR_PREFIX}{dead}-3"));
+        fs::create_dir(&stale).unwrap();
+        fs::write(stale.join("map.bin"), b"x").unwrap();
+        // pid 1 always exists.
+        let alive = root.join(format!("{DIR_PREFIX}1-3"));
+        fs::create_dir(&alive).unwrap();
+        let other = root.join(format!("{DIR_PREFIX}{dead}-x"));
+        fs::create_dir(&other).unwrap();
+
+        let dir = TempDir::create_in(&root).unwrap();
+        assert!(!stale.exists(), "stale dir swept");
+        assert!(alive.exists(), "live process's dir kept");
+        assert!(other.exists(), "foreign name kept");
+        drop(dir);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dir_names_parse() {
+        assert_eq!(dir_pid("cheatu-ptrmap-123-4"), Some(123));
+        assert_eq!(dir_pid("cheatu-ptrmap-123-x"), None);
+        assert_eq!(dir_pid("cheatu-ptrmap-0-1"), None);
+        assert_eq!(dir_pid("other-123-4"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_prefers_var_tmp() {
+        if Path::new("/var/tmp").is_dir() {
+            assert_eq!(PointerMap::temp_root(), PathBuf::from("/var/tmp"));
+        }
     }
 }
