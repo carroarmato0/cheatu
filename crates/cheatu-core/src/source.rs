@@ -26,6 +26,11 @@ impl LiveSource {
         Ok(LiveSource { mem, regions })
     }
 
+    /// The process this reads.
+    pub fn pid(&self) -> i32 {
+        self.mem.pid()
+    }
+
     /// Re-read the memory map (modules may have been loaded or unloaded).
     pub fn refresh_regions(&mut self) -> io::Result<()> {
         self.regions = read_maps(self.mem.pid())?;

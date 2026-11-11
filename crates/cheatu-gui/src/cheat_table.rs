@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use cheatu_core::process::ProcInfo;
 use cheatu_core::table::{self, TableEntry, TableError};
-use cheatu_core::{module_containing, AddrExpr, Expr, MemoryRegion, ScanType, ScanValue};
+use cheatu_core::{
+    module_containing, AddrExpr, Expr, MemoryRegion, ScanType, ScanValue, SignatureError,
+};
 
 /// A frozen entry re-resolves this often: pointers can change when the game
 /// loads a new area, but not every 40 ms freeze tick.
@@ -188,6 +190,58 @@ pub fn entry_for_address(regions: &[MemoryRegion], addr: u64, ty: ScanType) -> T
         value,
         frozen: false,
     }
+}
+
+/// What the status bar says when no unique signature exists.
+pub const NOT_UNIQUE: &str = "No unique pattern within 64 bytes; for heap values use Pointer scan";
+
+/// The result of a background "Make AoB signature", with what it was started
+/// for.
+pub struct BgSignature {
+    /// The row it was started for.
+    pub id: u64,
+    /// The row's expression when it started.
+    pub expr: AddrExpr,
+    /// The process it read.
+    pub pid: i32,
+    /// The app's resolve generation when it started.
+    pub generation: u64,
+    pub result: Result<AddrExpr, SignatureError>,
+}
+
+/// Apply a finished signature to its row: on success, if the row is still
+/// the one it was made for (same process, generation and expression), the
+/// expression is replaced like an edit and the row re-resolves. Returns
+/// whether the row changed (the caller bumps the resolve generation) and the
+/// status bar text.
+pub fn apply_signature(
+    entries: &mut [GuiEntry],
+    pid: i32,
+    generation: u64,
+    r: BgSignature,
+) -> (bool, String) {
+    let expr = match r.result {
+        Ok(expr) => expr,
+        Err(SignatureError::NotUnique) => return (false, NOT_UNIQUE.into()),
+        Err(e) => return (false, format!("No AoB signature: {e}.")),
+    };
+    let row = entries
+        .iter_mut()
+        .find(|e| e.id == r.id)
+        .filter(|e| r.pid == pid && r.generation == generation && e.entry.address == r.expr);
+    let Some(e) = row else {
+        return (
+            false,
+            "AoB signature discarded: the row or the process changed while it was made.".into(),
+        );
+    };
+    e.expr_text = expr.to_string();
+    e.entry.address = expr;
+    e.parse_error = None;
+    e.resolved = Err("not resolved yet".into());
+    e.write_failed = false;
+    e.needs_resolve = true;
+    (true, format!("AoB signature: {}", e.expr_text))
 }
 
 /// A table read from disk, ready for the GUI.
@@ -534,5 +588,77 @@ frozen = true
         assert!(!apply_background_result(&mut v, 7, 5, r, now));
         assert!(v[0].needs_resolve, "the requested re-resolve is kept");
         assert!(v[0].resolved.is_err());
+    }
+    fn sig(
+        e: &GuiEntry,
+        pid: i32,
+        generation: u64,
+        result: Result<AddrExpr, SignatureError>,
+    ) -> BgSignature {
+        BgSignature {
+            id: e.id,
+            expr: e.entry.address.clone(),
+            pid,
+            generation,
+            result,
+        }
+    }
+
+    #[test]
+    fn signature_replaces_the_expression_like_an_edit() {
+        let mut v = vec![entry("0x7f001000", true)];
+        v[0].resolved = Ok(0x7f00_1000);
+        let new = AddrExpr::parse("aob(\"48 8B ?? 05\", \"game\")+0x3").unwrap();
+        let r = sig(&v[0], 7, 3, Ok(new.clone()));
+        let (changed, status) = apply_signature(&mut v, 7, 3, r);
+        assert!(changed);
+        assert_eq!(v[0].entry.address, new);
+        assert_eq!(v[0].expr_text, new.to_string());
+        assert!(v[0].parse_error.is_none());
+        assert!(v[0].needs_resolve, "re-resolved like an edit");
+        assert!(v[0].resolved.is_err());
+        assert!(status.contains(&new.to_string()), "{status}");
+    }
+
+    #[test]
+    fn signature_not_unique_suggests_pointer_scan() {
+        let mut v = vec![entry("0x7f001000", false)];
+        v[0].resolved = Ok(0x7f00_1000);
+        let r = sig(&v[0], 7, 3, Err(SignatureError::NotUnique));
+        let (changed, status) = apply_signature(&mut v, 7, 3, r);
+        assert!(!changed);
+        assert_eq!(
+            status,
+            "No unique pattern within 64 bytes; for heap values use Pointer scan"
+        );
+        assert_eq!(v[0].entry.address.to_string(), "0x7f001000");
+        assert_eq!(v[0].resolved, Ok(0x7f00_1000));
+
+        let r = sig(&v[0], 7, 3, Err(SignatureError::Unreadable(0x10)));
+        let (changed, status) = apply_signature(&mut v, 7, 3, r);
+        assert!(!changed);
+        assert!(status.contains("0x10"), "{status}");
+    }
+
+    #[test]
+    fn stale_signature_is_dropped() {
+        let new = AddrExpr::parse("aob(\"48 8B\")").unwrap();
+        let mut v = vec![entry("0x1000", false)];
+        // Another process, another generation, an edited row, a removed row.
+        for (pid, generation) in [(9, 3), (7, 4)] {
+            let r = sig(&v[0], 7, 3, Ok(new.clone()));
+            let (changed, _) = apply_signature(&mut v, pid, generation, r);
+            assert!(!changed);
+            assert_eq!(v[0].entry.address.to_string(), "0x1000");
+        }
+        let mut r = sig(&v[0], 7, 3, Ok(new.clone()));
+        r.expr = AddrExpr::parse("0x2000").unwrap();
+        assert!(!apply_signature(&mut v, 7, 3, r).0);
+        let gone = entry("0x1000", false);
+        let r = sig(&gone, 7, 3, Ok(new));
+        let (changed, status) = apply_signature(&mut v, 7, 3, r);
+        assert!(!changed);
+        assert!(!status.is_empty());
+        assert_eq!(v[0].entry.address.to_string(), "0x1000");
     }
 }

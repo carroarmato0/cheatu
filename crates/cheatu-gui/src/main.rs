@@ -8,6 +8,7 @@
 
 mod cheat_table;
 mod file_dialog;
+mod pointer_window;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,7 @@ use cheatu_inject::{agent, detect_dir, find_rpgmaker_games, scan_dir, Engine, Fo
 
 use cheat_table::GuiEntry;
 use file_dialog::FileDialog;
+use pointer_window::PointerWindow;
 
 /// How often the background freeze thread rewrites frozen values.
 const FREEZE_INTERVAL: Duration = Duration::from_millis(40);
@@ -1374,6 +1376,10 @@ struct CheatuApp {
     file_dialog: Option<(DialogPurpose, FileDialog)>,
     /// After opening a table: offer to attach to this (pid, name).
     attach_offer: Option<(i32, String)>,
+    /// The one "Make AoB signature" running in the background.
+    sig_pending: Option<Receiver<cheat_table::BgSignature>>,
+    /// The pointer scan window, while open.
+    pointer_window: Option<PointerWindow>,
 
     // Background freeze.
     freeze_state: Arc<Mutex<FreezeShared>>,
@@ -1973,6 +1979,89 @@ impl CheatuApp {
         }
     }
 
+    /// Start "Make AoB signature" for row `i` on a background thread: it
+    /// scans memory and waits between two reads.
+    fn start_signature(&mut self, i: usize) {
+        let Some(pid) = self.attached.as_ref().map(|(p, _)| *p) else {
+            self.status = "Attach to a process first.".into();
+            return;
+        };
+        let Some(e) = self.saved.get(i) else {
+            return;
+        };
+        let Ok(addr) = e.resolved else {
+            self.status = "The address does not resolve.".into();
+            return;
+        };
+        if self.sig_pending.is_some() {
+            self.status = "An AoB signature is already being made.".into();
+            return;
+        }
+        let (id, expr, generation) = (e.id, e.entry.address.clone(), self.resolve_generation);
+        let (tx, rx) = mpsc::channel();
+        self.sig_pending = Some(rx);
+        self.status = format!("Making an AoB signature for 0x{addr:x}…");
+        std::thread::spawn(move || {
+            let result = match LiveSource::open(pid) {
+                Ok(src) => cheatu_core::make_signature(&src, addr, 64),
+                Err(_) => Err(cheatu_core::SignatureError::Unreadable(addr)),
+            };
+            let _ = tx.send(cheat_table::BgSignature {
+                id,
+                expr,
+                pid,
+                generation,
+                result,
+            });
+        });
+    }
+
+    /// Apply a finished "Make AoB signature".
+    fn poll_signature(&mut self) {
+        let Some(rx) = &self.sig_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(r) => {
+                self.sig_pending = None;
+                let pid = self.attached.as_ref().map(|(p, _)| *p).unwrap_or(0);
+                let (changed, status) =
+                    cheat_table::apply_signature(&mut self.saved, pid, self.resolve_generation, r);
+                // An edit: a resolve of the old expression must not land.
+                if changed {
+                    self.resolve_generation += 1;
+                }
+                self.status = status;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.sig_pending = None;
+                self.status = "Making the AoB signature failed.".into();
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Open the pointer scan window for row `i` (or point it there).
+    fn open_pointer_window(&mut self, i: usize) {
+        let (Some((_, name)), Some(e)) = (self.attached.clone(), self.saved.get(i)) else {
+            return;
+        };
+        let Ok(addr) = e.resolved else {
+            self.status = "The address does not resolve.".into();
+            return;
+        };
+        let ty = e.entry.ty;
+        match &mut self.pointer_window {
+            Some(w) if w.busy() => {
+                self.status = "A pointer scan is running; cancel it first.".into();
+            }
+            Some(w) => w.retarget(addr, name, ty),
+            None => {
+                self.pointer_window = Some(PointerWindow::open_for(addr, name).with_type(ty));
+            }
+        }
+    }
+
     /// Why the table can't be saved as it is, if it can't.
     fn save_blocker(&self) -> Option<String> {
         self.saved.iter().enumerate().find_map(|(i, e)| {
@@ -2113,6 +2202,7 @@ impl eframe::App for CheatuApp {
         self.poll_scan();
         self.poll_probe();
         self.resolve_entries();
+        self.poll_signature();
         self.sync_freezes();
 
         // Re-attach to the target we were relaunched (elevated) for.
@@ -2139,6 +2229,9 @@ impl eframe::App for CheatuApp {
         let mut quick_save = false;
         // Index of the cheat table row whose value should be written once.
         let mut do_set: Option<usize> = None;
+        // Row to make an AoB signature for / to pointer scan.
+        let mut do_signature: Option<usize> = None;
+        let mut do_ptr_scan: Option<usize> = None;
         // Results column header the user clicked, applied once the table has
         // let go of `self.display`.
         let mut new_res_sort: Option<ResSort> = None;
@@ -2346,6 +2439,8 @@ impl eframe::App for CheatuApp {
 
                     let attached = self.attached.is_some();
                     let aob_busy = self.aob_pending.is_some();
+                    let sig_busy = self.sig_pending.is_some();
+                    let can_read = attached && self.live.is_some();
                     let live_error = self.live_error.as_deref();
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
@@ -2425,6 +2520,44 @@ impl eframe::App for CheatuApp {
                                     if ui.small_button("🗑").on_hover_text("remove").clicked() {
                                         remove_from_table.push(i);
                                     }
+                                    let usable = can_read && resolved;
+                                    ui.menu_button("…", |ui| {
+                                        if ui
+                                            .add_enabled(
+                                                usable && !sig_busy,
+                                                egui::Button::new("Make AoB signature"),
+                                            )
+                                            .on_hover_text(
+                                                "Replace the address with a byte pattern \
+                                                 search that survives restarts",
+                                            )
+                                            .on_disabled_hover_text(if sig_busy {
+                                                "A signature is already being made."
+                                            } else {
+                                                "Attach, and let the address resolve first."
+                                            })
+                                            .clicked()
+                                        {
+                                            do_signature = Some(i);
+                                            ui.close_menu();
+                                        }
+                                        if ui
+                                            .add_enabled(usable, egui::Button::new("Pointer scan…"))
+                                            .on_hover_text(
+                                                "Find pointer chains from static data to \
+                                                 this address",
+                                            )
+                                            .on_disabled_hover_text(
+                                                "Attach, and let the address resolve first.",
+                                            )
+                                            .clicked()
+                                        {
+                                            do_ptr_scan = Some(i);
+                                            ui.close_menu();
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text("More: AoB signature, pointer scan");
                                 });
                                 ui.horizontal(|ui| {
                                     let resp = ui.add(
@@ -3266,6 +3399,29 @@ impl eframe::App for CheatuApp {
                 }
             }
         }
+        // ---- Pointer scan window -----------------------------------------
+        if let Some(i) = do_ptr_scan {
+            self.open_pointer_window(i);
+        }
+        if let Some(mut w) = self.pointer_window.take() {
+            w.pause_target = self.pause_while_scanning;
+            // "Filter by value" reads the scanner's value type; with no
+            // single type selected, the scanned row's.
+            if let TypeSel::One(t) = self.type_sel {
+                w.value_ty = t;
+            } else if let Some(t) = w.entry_type() {
+                w.value_ty = t;
+            }
+            self.fresh_live();
+            if let Some(entry) = w.show(ctx, self.live.as_ref()) {
+                self.status = format!("Added {} to the cheat table.", entry.address);
+                self.saved.push(GuiEntry::new(entry, false));
+            }
+            if w.is_open() {
+                self.pointer_window = Some(w);
+            }
+        }
+
         if let Some((pid, name)) = self.attach_offer.clone() {
             let mut close = false;
             egui::Window::new("Attach to the table's process?")
@@ -3390,6 +3546,9 @@ impl eframe::App for CheatuApp {
                 },
             };
         }
+        if let Some(i) = do_signature {
+            self.start_signature(i);
+        }
         // Remove in reverse so indices stay valid.
         remove_from_table.sort_unstable();
         for i in remove_from_table.into_iter().rev() {
@@ -3437,6 +3596,8 @@ impl eframe::App for CheatuApp {
         if self.scanner.is_some()
             || self.scanning
             || self.aob_pending.is_some()
+            || self.sig_pending.is_some()
+            || self.pointer_window.as_ref().is_some_and(|w| w.busy())
             || self.mode == AppMode::RpgMaker
         {
             ctx.request_repaint_after(Duration::from_millis(120));
