@@ -5,7 +5,7 @@
 <h1 align="center">cheatu</h1>
 
 <p align="center">
-  <strong>A fast, native memory scanner &amp; cheat tool for Linux.</strong><br>
+  <strong>A fast, native memory scanner &amp; cheat tool for Linux and macOS.</strong><br>
   Inspired by <a href="https://cheatengine.org/">Cheat Engine</a> and
   <a href="https://github.com/scanmem/scanmem">scanmem</a> — with a modern GUI
   and a stable mode for RPG Maker games.
@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://github.com/carroarmato0/cheatu/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/carroarmato0/cheatu/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/carroarmato0/cheatu/releases"><img alt="Release" src="https://img.shields.io/github/v/release/carroarmato0/cheatu?sort=semver"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-informational">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange?logo=rust">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <a href="https://ko-fi.com/carroarmato0"><img alt="Support me on Ko-fi" src="https://ko-fi.com/img/githubbutton_sm.svg" height="20"></a>
@@ -74,6 +74,10 @@ Every package installs three binaries — `cheatu` (CLI), `cheatu-gui` (GUI), an
 
 Prefer to build it yourself? See **[Building & packaging](docs/packaging.md)**.
 
+**macOS** has no prebuilt package yet: build it with `cargo build --release`
+— see the **[macOS guide](docs/macos.md)** for setup, privileges and the
+hardened-runtime caveat.
+
 ## 🚀 Quick start
 
 ### GUI
@@ -106,7 +110,9 @@ reference in the **[usage guide](docs/usage.md)**.
 
 > **Heads-up:** reading another process's memory needs **root** or
 > **`CAP_SYS_PTRACE`**. cheatu can elevate itself via `pkexec` — click
-> *Request root access* in the GUI, or type `sudo` in the CLI.
+> *Request root access* in the GUI, or type `sudo` in the CLI. On **macOS**
+> it needs root (the GUI shows the admin prompt; run the CLI as `sudo cheatu`),
+> and hardened-runtime apps stay off-limits — see the [macOS guide](docs/macos.md).
 
 ## 📖 Documentation
 
@@ -114,6 +120,7 @@ reference in the **[usage guide](docs/usage.md)**.
 |-------|---------------|
 | [Usage](docs/usage.md) | Privileges, the CLI REPL, the GUI scanner, finding Proton games, CJK fonts. |
 | [RPG Maker mode](docs/rpg-maker.md) | The JavaScript-injection backend for RPG Maker MV/MZ. |
+| [macOS](docs/macos.md) | Building on macOS, privileges, the hardened runtime / SIP, differences from Linux. |
 | [Internals](docs/internals.md) | How the scan engine works, performance, and testing. |
 | [Building & packaging](docs/packaging.md) | Build from source, the `Makefile`, container packaging, CI/releases. |
 

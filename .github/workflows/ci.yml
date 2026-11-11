@@ -51,6 +51,26 @@ jobs:
           path: target/release/cheatu-gui
           retention-days: 1
 
+  macos:
+    name: Test & lint (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
   # The AUR PKGBUILD can only be checked with Arch's own tools, and its
   # dependency list can only be checked against a built binary — the GUI
   # dlopens its windowing stack, so nothing links to it.

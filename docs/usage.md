@@ -10,6 +10,8 @@ For RPG Maker / NW.js games, see the [RPG Maker mode guide](rpg-maker.md).
 
 ## Privileges
 
+> On macOS, see the [macOS guide](macos.md) for privileges instead.
+
 Reading and writing another process's memory on Linux requires either running as
 **root** or holding **`CAP_SYS_PTRACE`** (and a permissive
 `/proc/sys/kernel/yama/ptrace_scope`). cheatu never needs elevation just to

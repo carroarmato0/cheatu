@@ -21,6 +21,10 @@ make install      # install under $(PREFIX) (honours PREFIX / DESTDIR)
 make help         # the full list
 ```
 
+On macOS, install the toolchain with `brew install rustup && rustup default
+stable` and build the same way; see the [macOS guide](macos.md). The packaging
+targets below are Linux-only.
+
 ## Packaging
 
 Distro packages are built in a container so the toolchain is reproducible and
@@ -70,7 +74,7 @@ game's own files.
 ## Continuous integration & releases
 
 - `.github/workflows/ci.yml` runs `fmt`, `clippy`, tests, and a release build
-  on every push and pull request.
+  on every push and pull request, plus `clippy` and tests on macOS.
 - `.github/workflows/release.yml` fires when a `v*` tag is pushed: it builds
   every package format and attaches the artifacts to the GitHub Release for that
   tag.
