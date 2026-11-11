@@ -59,6 +59,19 @@ const MAX_DISPLAY: usize = 2000;
 /// above this count.
 const HINT_THRESHOLD: usize = 200;
 
+/// Narrowest the scan results may get: the results table's fixed columns,
+/// its "+" column and the gaps and margins around them. The cheat table panel
+/// can't be dragged wider than what leaves this much room, so it never covers
+/// the results.
+const RESULTS_MIN_WIDTH: f32 = 640.0;
+
+/// Width of the results table's "+" / probe column. Below this the add button
+/// would be squeezed out of sight.
+const RESULT_ACTIONS_MIN_WIDTH: f32 = 64.0;
+
+/// Narrowest the cheat table panel may be dragged.
+const CHEAT_TABLE_MIN_WIDTH: f32 = 260.0;
+
 /// Set by build.rs: the git tag when built exactly on one, else the short
 /// commit hash, else the crate version (tarball builds without .git).
 const VERSION: &str = env!("CHEATU_VERSION");
@@ -1925,9 +1938,12 @@ impl eframe::App for CheatuApp {
         // `self.saved` is borrowed mutably.
         let scanner_ref = self.scanner.as_ref();
         if self.mode == AppMode::Scanner {
+            let max_width =
+                (ctx.screen_rect().width() - RESULTS_MIN_WIDTH).max(CHEAT_TABLE_MIN_WIDTH);
             egui::SidePanel::right("cheat_table")
                 .resizable(true)
                 .default_width(460.0)
+                .width_range(CHEAT_TABLE_MIN_WIDTH..=max_width)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("Cheat table");
@@ -2289,15 +2305,17 @@ impl eframe::App for CheatuApp {
                 // Fixed widths (not `auto`) so a constantly-changing float in
                 // "Current" can't reflow the row and make the + button jump.
                 // `clip` truncates over-long values instead of widening the cell.
+                // Kept narrow so they plus the "+" column fit in
+                // RESULTS_MIN_WIDTH; wider ones squeezed the "+" out of sight.
                 .column(Column::exact(150.0))
-                .column(Column::exact(90.0).clip(true))
-                .column(Column::exact(120.0).clip(true))
-                .column(Column::exact(120.0).clip(true));
+                .column(Column::exact(72.0).clip(true))
+                .column(Column::exact(96.0).clip(true))
+                .column(Column::exact(96.0).clip(true));
             if show_hints {
-                table = table.column(Column::exact(130.0).clip(true));
+                table = table.column(Column::exact(104.0).clip(true));
             }
             table
-                .column(Column::remainder())
+                .column(Column::remainder().at_least(RESULT_ACTIONS_MIN_WIDTH))
                 .header(20.0, |mut header| {
                     // A sortable header, or a plain one while the list is
                     // truncated, explaining why it won't sort.
