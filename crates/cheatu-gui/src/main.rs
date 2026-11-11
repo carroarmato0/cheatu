@@ -2512,6 +2512,11 @@ impl eframe::App for CheatuApp {
                         }),
                     }
                     let count = rows.len();
+                    // Never attach to a row the filter hides: move a hidden
+                    // selection to the first visible row (or clear it).
+                    if !selected.is_some_and(|pid| rows.iter().any(|p| p.pid == pid)) {
+                        selected = rows.first().map(|p| p.pid);
+                    }
 
                     // Leave room for the action bar at the bottom.
                     // Fixed, screen-derived height leaves room for the action
