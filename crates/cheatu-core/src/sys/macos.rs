@@ -441,14 +441,61 @@ pub(crate) fn available_memory() -> Option<usize> {
 
 pub(crate) const ELEVATION_TOOL: &str = "the macOS admin prompt";
 
-// Replaced in task 4.
+const OSASCRIPT: &str = "/usr/bin/osascript";
+
 pub(crate) fn elevation_available() -> bool {
-    false
+    Path::new(OSASCRIPT).is_file()
 }
 
-// Replaced in task 4.
-pub(crate) fn relaunch_elevated(_exe: &Path, _args: &[String]) -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, "elevation not implemented yet")
+/// Relaunch `exe` with `args` as root through the native administrator
+/// prompt. On success the elevated instance runs in the background and this
+/// process exits; only returns on failure (including the user cancelling).
+pub(crate) fn relaunch_elevated(exe: &Path, args: &[String]) -> io::Error {
+    // `do shell script` runs with root's environment; keep HOME so config
+    // lookups (e.g. the saved theme) still find the invoking user's files.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let script = format!(
+        "do shell script {} with administrator privileges",
+        applescript_quote(&elevated_shell_command(&home, exe, args))
+    );
+    match std::process::Command::new(OSASCRIPT)
+        .arg("-e")
+        .arg(script)
+        .output()
+    {
+        Ok(out) if out.status.success() => std::process::exit(0),
+        Ok(out) => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ),
+        Err(e) => e,
+    }
+}
+
+/// The shell command the admin prompt runs: start `exe` detached so
+/// `do shell script` (which waits for its command) returns right away.
+fn elevated_shell_command(home: &str, exe: &Path, args: &[String]) -> String {
+    let mut cmd = format!(
+        "HOME={} {}",
+        sh_quote(home),
+        sh_quote(&exe.to_string_lossy())
+    );
+    for a in args {
+        cmd.push(' ');
+        cmd.push_str(&sh_quote(a));
+    }
+    cmd.push_str(" >/dev/null 2>&1 &");
+    cmd
+}
+
+/// Single-quote `s` for `sh`.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Double-quote `s` as an AppleScript string literal.
+fn applescript_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', r"\\").replace('"', r#"\""#))
 }
 
 #[cfg(test)]
@@ -459,5 +506,33 @@ mod tests {
     fn environ_of_self_contains_path() {
         let env = environ(std::process::id() as i32).expect("own environment readable");
         assert!(env.iter().any(|kv| kv.starts_with("PATH=")), "{env:?}");
+    }
+
+    #[test]
+    fn sh_quote_wraps_and_escapes_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("it's"), r"'it'\''s'");
+        assert_eq!(
+            sh_quote(r#"/Users/x/My "Game"/a b"#),
+            r#"'/Users/x/My "Game"/a b'"#
+        );
+    }
+
+    #[test]
+    fn applescript_quote_escapes_quotes_and_backslashes() {
+        assert_eq!(applescript_quote(r#"a "b" \c"#), r#""a \"b\" \\c""#);
+    }
+
+    #[test]
+    fn elevated_command_runs_exe_in_background_with_home() {
+        let cmd = elevated_shell_command(
+            "/Users/me",
+            Path::new("/Apps/cheatu gui"),
+            &["--attach".into(), "42".into()],
+        );
+        assert_eq!(
+            cmd,
+            "HOME='/Users/me' '/Apps/cheatu gui' '--attach' '42' >/dev/null 2>&1 &"
+        );
     }
 }
