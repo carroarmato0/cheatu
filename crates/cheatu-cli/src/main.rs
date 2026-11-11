@@ -2,8 +2,14 @@
 
 use std::io::{self, Write};
 
+mod ptr_cmds;
+mod table_cmds;
+
+use cheatu_core::pointer_scan::PtrResults;
 use cheatu_core::privilege;
 use cheatu_core::scan::{FirstScan, NextScan, Scanner, ANY_TYPES};
+use cheatu_core::table::TableEntry;
+use cheatu_core::LiveSource;
 use cheatu_core::{list_processes, ScanType};
 
 fn main() {
@@ -57,6 +63,12 @@ struct Repl {
     ty: ScanType,
     /// When set, first scans try every type in [`ANY_TYPES`].
     any: bool,
+    /// Expression resolution and pointer scans read through this.
+    src: Option<LiveSource>,
+    /// Name of the attached process, for saved tables and pointer results.
+    process: Option<String>,
+    table: Vec<TableEntry>,
+    ptr: Option<PtrResults>,
 }
 
 impl Repl {
@@ -65,6 +77,10 @@ impl Repl {
             scanner: None,
             ty: ScanType::I32,
             any: false,
+            src: None,
+            process: None,
+            table: Vec::new(),
+            ptr: None,
         }
     }
 
@@ -105,7 +121,7 @@ impl Repl {
             if line.is_empty() {
                 continue;
             }
-            if !self.dispatch(line) {
+            if !self.dispatch(line, &mut io::stdout()) {
                 break;
             }
         }
@@ -113,13 +129,27 @@ impl Repl {
     }
 
     /// Returns false to quit the REPL.
-    fn dispatch(&mut self, line: &str) -> bool {
+    fn dispatch(&mut self, line: &str, out: &mut dyn Write) -> bool {
+        let _ = self.dispatch_io(line, out);
+        !matches!(line.split_whitespace().next(), Some("quit" | "exit" | "q"))
+    }
+
+    /// The memory source with a fresh memory map, so modules loaded since
+    /// attaching resolve.
+    fn fresh_src(&mut self) -> Option<&LiveSource> {
+        if let Some(s) = &mut self.src {
+            let _ = s.refresh_regions();
+        }
+        self.src.as_ref()
+    }
+
+    fn dispatch_io(&mut self, line: &str, out: &mut dyn Write) -> io::Result<()> {
         let cmd = line.split_whitespace().next().unwrap_or("");
         let rest = line[cmd.len()..].trim();
 
         match cmd {
-            "help" | "?" => print_help(),
-            "quit" | "exit" | "q" => return false,
+            "help" | "?" => print_help(out)?,
+            "quit" | "exit" | "q" => {}
             "sudo" | "elevate" => self.elevate(),
             "ps" | "processes" => list_procs(rest),
             "pid" | "attach" => match rest.parse::<i32>() {
@@ -133,11 +163,34 @@ impl Repl {
             "count" => self.count(),
             "set" => self.set(rest),
             "setall" => self.set_all(rest),
-            "write" => self.write_direct(rest),
+            "write" => self.write_direct(rest, out)?,
+            "add" => {
+                let ty = self.ty;
+                self.fresh_src();
+                table_cmds::add(out, &mut self.table, self.src.as_ref(), ty, rest)?
+            }
+            "entries" => {
+                self.fresh_src();
+                table_cmds::entries(out, &self.table, self.src.as_ref())?
+            }
+            "resolve" => {
+                self.fresh_src();
+                table_cmds::resolve(out, self.src.as_ref(), rest)?
+            }
+            "save" => table_cmds::save(out, &self.table, self.process.as_deref(), rest)?,
+            "load" => table_cmds::load(out, &mut self.table, rest)?,
+            "ptrscan" => {
+                let ctx = ptr_cmds::PtrCtx {
+                    src: self.src.as_mut(),
+                    process: self.process.as_deref().unwrap_or("?"),
+                    ty: self.ty,
+                };
+                ptr_cmds::run(out, &mut self.ptr, ctx, rest)?
+            }
             "reset" | "clear" => self.reset(),
             other => println!("unknown command {other:?}; type `help`."),
         }
-        true
+        Ok(())
     }
 
     fn elevate(&mut self) {
@@ -173,6 +226,14 @@ impl Repl {
                     self.type_label()
                 );
                 self.scanner = Some(s);
+                self.process = Some(name);
+                self.src = match LiveSource::open(pid) {
+                    Ok(src) => Some(src),
+                    Err(e) => {
+                        println!("note: address expressions unavailable: {e}");
+                        None
+                    }
+                };
             }
             Err(e) => {
                 println!("failed to attach to pid {pid}: {e}");
@@ -402,29 +463,29 @@ impl Repl {
         println!("wrote {val} to {ok} addresses ({fail} failed/skipped).");
     }
 
-    fn write_direct(&mut self, rest: &str) {
-        let Some(scanner) = &self.scanner else {
-            println!("not attached.");
-            return;
+    fn write_direct(&mut self, rest: &str, out: &mut dyn Write) -> io::Result<()> {
+        self.fresh_src();
+        let (Some(scanner), Some(src)) = (&self.scanner, &self.src) else {
+            return writeln!(out, "not attached.");
         };
-        let mut parts = rest.split_whitespace();
-        let (Some(addr), Some(val)) = (parts.next(), parts.next()) else {
-            println!("usage: write <hex-address> <value>");
-            return;
-        };
-        let addr = addr.trim_start_matches("0x");
-        let Ok(addr) = u64::from_str_radix(addr, 16) else {
-            println!("address must be hexadecimal, e.g. 0x7f1234.");
-            return;
+        let (addr, val) = table_cmds::split_expr(rest);
+        let val = val.split_whitespace().next().unwrap_or("");
+        if addr.is_empty() || val.is_empty() {
+            return writeln!(out, "usage: write <expr|hex-address> <value>");
+        }
+        // Digits only keeps the old meaning (hex, `0x` optional); anything
+        // else is an address expression.
+        let addr = match table_cmds::parse_target(src, addr) {
+            Ok(a) => a,
+            Err(e) => return writeln!(out, "{e}"),
         };
         // Direct writes use the concrete type (Any has no single width).
         let Some(value) = self.ty.parse(val) else {
-            println!("could not parse {val:?} as {}.", self.ty);
-            return;
+            return writeln!(out, "could not parse {val:?} as {}.", self.ty);
         };
         match scanner.write_value(addr, &value) {
-            Ok(()) => println!("wrote {value} to 0x{addr:012x} ({}).", self.ty),
-            Err(e) => println!("write failed: {e}"),
+            Ok(()) => writeln!(out, "wrote {value} to 0x{addr:012x} ({}).", self.ty),
+            Err(e) => writeln!(out, "write failed: {e}"),
         }
     }
 
@@ -457,8 +518,9 @@ fn list_procs(filter: &str) {
     }
 }
 
-fn print_help() {
-    println!(
+fn print_help(out: &mut dyn Write) -> io::Result<()> {
+    writeln!(
+        out,
         "\
 commands:
   ps [filter]          list processes (optionally filtered by name/cmdline)
@@ -483,7 +545,25 @@ commands:
   count                number of candidates
   set <index> <value>  write value to candidate #index (uses that candidate's type)
   setall <value>       write value to every candidate
-  write <addr> <value> write value to a hex address directly (uses the concrete type)
+  write <expr|hex> <value>
+                       write value to an address (hex digits, or an expression) directly
+                         (uses the concrete type)
+  add <expr> [type] [description…]
+                       add an address expression to the cheat table
+  entries              show table entries with resolved address and current value
+  resolve <expr>       resolve an address expression, e.g. resolve [\"game\"+0x10]+0x8
+  save <file>          save the cheat table
+  load <file>          load a cheat table (never writes memory; freezes stay off)
+  ptrscan <expr|hex> [depth] [max-offset]
+                       find pointer chains from a module to an address
+                         (depth 1-8, default 5; max-offset 0x8-0x100000, default 0x1000)
+  ptrscan filter addr <expr|hex>
+                       keep chains that resolve to this address now
+  ptrscan filter value <value>
+                       keep chains whose target holds this value now (current type)
+  ptrscan save <file>  save the pointer scan results
+  ptrscan load <file>  load pointer scan results
+  ptrscan list [n]     show up to n chains (default 20)
   reset                clear the candidate list
   {}
   help                 this help
@@ -493,7 +573,7 @@ commands:
         } else {
             "sudo                 relaunch with root privileges (via pkexec)"
         }
-    );
+    )
 }
 
 fn print_usage() {
@@ -501,4 +581,112 @@ fn print_usage() {
         "usage: cheatu [--pid <n>]\n\
          interactive memory scanner. run without arguments for the REPL."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    static PTR: AtomicUsize = AtomicUsize::new(0);
+
+    fn attached() -> Repl {
+        let mut repl = Repl::new();
+        let mut out = Vec::new();
+        repl.dispatch(&format!("attach {}", std::process::id()), &mut out);
+        assert!(repl.scanner.is_some(), "attach failed");
+        repl
+    }
+
+    fn run(repl: &mut Repl, line: &str) -> String {
+        let mut out = Vec::new();
+        repl.dispatch(line, &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    fn leaked_u32(v: u32) -> (&'static AtomicU32, u64) {
+        let b: &'static AtomicU32 = Box::leak(Box::new(AtomicU32::new(v)));
+        (b, b as *const AtomicU32 as u64)
+    }
+
+    #[test]
+    fn add_and_entries_show_resolved_value() {
+        let (_b, addr) = leaked_u32(0x00C0_FFEE);
+        let mut repl = attached();
+        let out = run(&mut repl, &format!("add {addr:#x} u32 my gold"));
+        assert!(out.contains("added entry 0"), "{out}");
+        let out = run(&mut repl, "entries");
+        assert!(out.contains("my gold"), "{out}");
+        assert!(out.contains(&format!("{addr:#x}")), "{out}");
+        assert!(out.contains("12648430"), "{out}");
+    }
+
+    #[test]
+    fn save_then_load_round_trips_with_freezes_off() {
+        let (_b, addr) = leaked_u32(5);
+        let mut repl = attached();
+        run(&mut repl, &format!("add {addr:#x} u32 hp"));
+        repl.table[0].frozen = true;
+        let path = std::env::temp_dir().join(format!("cheatu-cli-{}.toml", std::process::id()));
+        let p = path.display();
+        assert!(run(&mut repl, &format!("save {p}")).contains("saved 1"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("frozen = true"), "{text}");
+        repl.table.clear();
+        let out = run(&mut repl, &format!("load {p}"));
+        std::fs::remove_file(&path).ok();
+        assert!(out.contains("loaded 1 entries, freezes off"), "{out}");
+        assert_eq!(repl.table.len(), 1);
+        assert!(!repl.table[0].frozen);
+        assert_eq!(repl.table[0].description, "hp");
+    }
+
+    #[test]
+    fn resolve_reports_error_text() {
+        let mut repl = attached();
+        let out = run(&mut repl, r#"resolve "no_such_module"+0x10"#);
+        assert!(out.contains("no_such_module"), "{out}");
+        assert!(!out.contains("= 0x"), "{out}");
+    }
+
+    #[test]
+    fn write_accepts_legacy_hex() {
+        let (b, addr) = leaked_u32(1);
+        let mut repl = attached();
+        run(&mut repl, "type u32");
+        let out = run(&mut repl, &format!("write {addr:x} 77"));
+        assert!(out.contains("wrote 77"), "{out}");
+        assert_eq!(b.load(Ordering::SeqCst), 77);
+        let out = run(&mut repl, &format!("write 0x{addr:x} 78"));
+        assert!(out.contains("wrote 78"), "{out}");
+        assert_eq!(b.load(Ordering::SeqCst), 78);
+    }
+
+    #[test]
+    fn ptrscan_finds_chain_and_lists_it() {
+        let target: &'static u64 = Box::leak(Box::new(0x1234_5678u64));
+        let addr = target as *const u64 as u64;
+        PTR.store(addr as usize, Ordering::SeqCst);
+        let mut repl = attached();
+        let out = run(&mut repl, &format!("ptrscan {addr:#x} 1"));
+        assert!(out.contains("chains found"), "{out}");
+        let res = repl.ptr.as_ref().expect("results stored");
+        let src = repl.src.as_ref().unwrap();
+        let chain = res
+            .chains
+            .iter()
+            .find(|c| c.resolve(src) == Ok(addr))
+            .expect("chain through PTR");
+        let expr = chain.to_expr().to_string();
+        let out = run(&mut repl, "ptrscan list 1000000");
+        assert!(out.contains(&expr), "{expr} not in listing");
+    }
+
+    #[test]
+    fn ptrscan_validates_arguments() {
+        let mut repl = attached();
+        assert!(run(&mut repl, "ptrscan 0x10 9").contains("depth"));
+        assert!(run(&mut repl, "ptrscan 0x10 2 4").contains("max-offset"));
+        assert!(run(&mut repl, "ptrscan list").contains("no pointer scan results"));
+    }
 }
