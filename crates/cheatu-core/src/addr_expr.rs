@@ -75,7 +75,18 @@ impl AddrExpr {
         if let Some(c) = p.peek() {
             return Err(p.error(format!("unexpected `{c}`")));
         }
-        Ok(AddrExpr(expr))
+        let expr = AddrExpr(expr);
+        // Whatever parses must survive a save and reload, so the canonical
+        // text has to fit the input limit too.
+        if expr.to_string().chars().count() > MAX_EXPR_LEN {
+            return Err(ParseError {
+                column: 1,
+                message: format!(
+                    "expression too long in canonical form (over {MAX_EXPR_LEN} characters)"
+                ),
+            });
+        }
+        Ok(expr)
     }
 
     /// True when no plain number is used as an address: every base is a
@@ -460,14 +471,22 @@ mod tests {
         // Counted in characters, not bytes.
         assert!(AddrExpr::parse(&format!("\"{}\"", "ゼ".repeat(1022))).is_ok());
 
+        // Fits as typed (1024 chars) but not once `0x` prefixes are added.
         let chain = format!("{} ", "1+".repeat(511) + "1");
         assert_eq!(chain.chars().count(), 1024);
-        // Canonical output uses `0x` prefixes, so it can be longer than the
-        // input; compare it with the 512-term chain rather than re-parsing.
-        let parsed = p(&chain);
-        assert_eq!(parsed.to_string(), vec!["0x1"; 512].join("+"));
-        let short = p(&vec!["1"; 200].join("+"));
-        assert_eq!(p(&short.to_string()), short);
+        let e = err(&chain);
+        assert_eq!(e.column, 1);
+        assert_eq!(
+            e.message,
+            "expression too long in canonical form (over 1024 characters)"
+        );
+
+        // Canonical form that fits parses and round-trips.
+        let fits = "0x1+".repeat(255) + "0x1";
+        assert_eq!(fits.chars().count(), 1023);
+        let parsed = p(&fits);
+        assert_eq!(parsed.to_string(), fits);
+        assert_eq!(p(&parsed.to_string()), parsed);
     }
 
     #[test]
