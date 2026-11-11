@@ -1,1 +1,328 @@
-//! macOS backend (Mach VM, libproc, sysctl, osascript).
+//! macOS backend: Mach VM calls on the target's task port, libproc and
+//! `sysctl` for process information, and the administrator prompt (osascript)
+//! for elevation.
+//!
+//! `task_for_pid` on another process needs root, and even root is refused for
+//! targets protected by the hardened runtime or System Integrity Protection.
+//! Our own task is always accessible, which is what the tests rely on.
+
+use std::ffi::CStr;
+use std::io;
+use std::path::Path;
+
+use mach2::kern_return::{
+    kern_return_t, KERN_INVALID_ADDRESS, KERN_PROTECTION_FAILURE, KERN_SUCCESS,
+};
+use mach2::mach_port::mach_port_deallocate;
+use mach2::port::{mach_port_name_t, mach_port_t, MACH_PORT_NULL};
+use mach2::traps::{mach_task_self, task_for_pid};
+use mach2::vm::{
+    mach_vm_protect, mach_vm_read_overwrite, mach_vm_region, mach_vm_region_recurse, mach_vm_write,
+};
+use mach2::vm_prot::{vm_prot_t, VM_PROT_COPY, VM_PROT_EXECUTE, VM_PROT_READ, VM_PROT_WRITE};
+use mach2::vm_region::{
+    vm_region_basic_info_64, vm_region_info_t, vm_region_recurse_info_t, vm_region_submap_info_64,
+    SM_SHARED, SM_SHARED_ALIASED, SM_TRUESHARED, VM_REGION_BASIC_INFO_64,
+};
+use mach2::vm_types::{mach_vm_address_t, mach_vm_size_t, natural_t};
+
+use super::RawProc;
+use crate::maps::MemoryRegion;
+
+extern "C" {
+    // Declared here: libc's binding is deprecated and mach2 0.4 lacks one.
+    fn mach_host_self() -> mach_port_t;
+    fn mach_error_string(error_value: kern_return_t) -> *const libc::c_char;
+}
+
+/// `user_tag`s of anonymous regions, from `<mach/vm_statistics.h>`.
+const VM_MEMORY_MALLOC_FIRST: u32 = 1; // VM_MEMORY_MALLOC
+const VM_MEMORY_MALLOC_LAST: u32 = 12; // VM_MEMORY_MALLOC_MEDIUM
+const VM_MEMORY_STACK: u32 = 30;
+
+fn mach_error(kr: kern_return_t) -> io::Error {
+    // SAFETY: mach_error_string returns a pointer to a static C string.
+    let msg = unsafe { CStr::from_ptr(mach_error_string(kr)) };
+    io::Error::other(format!("{} (kern_return_t {kr})", msg.to_string_lossy()))
+}
+
+/// The error for a `task_for_pid` refusal on a process that exists.
+fn denied_error(pid: i32, as_root: bool) -> io::Error {
+    let msg = if as_root {
+        format!(
+            "macOS refused access to process {pid} even as root — it is most likely \
+             protected by the hardened runtime or System Integrity Protection. Re-sign \
+             the game ad-hoc without the hardened runtime (codesign --force --sign - <app>) \
+             or disable SIP to scan it."
+        )
+    } else {
+        format!("permission denied for process {pid}: run cheatu as root (elevate) to scan it")
+    };
+    io::Error::new(io::ErrorKind::PermissionDenied, msg)
+}
+
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks for existence and permission.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+fn is_root() -> bool {
+    // SAFETY: geteuid is always safe to call.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// A send right to a target's task port. Plain integer, so `Send + Sync`;
+/// Mach VM calls on it are thread-safe.
+pub(crate) struct MemHandle {
+    task: mach_port_name_t,
+}
+
+impl MemHandle {
+    pub(crate) fn open(pid: i32) -> io::Result<MemHandle> {
+        if pid <= 0 || !process_exists(pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no such process: {pid}"),
+            ));
+        }
+        let mut task: mach_port_name_t = MACH_PORT_NULL;
+        // SAFETY: task_for_pid writes a port name into `task` on success.
+        let kr = unsafe { task_for_pid(mach_task_self(), pid, &mut task) };
+        if kr != KERN_SUCCESS {
+            return Err(denied_error(pid, is_root()));
+        }
+        Ok(MemHandle { task })
+    }
+
+    pub(crate) fn read_at(&self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let mut read: mach_vm_size_t = 0;
+        // SAFETY: the kernel copies at most buf.len() bytes into buf.
+        let kr = unsafe {
+            mach_vm_read_overwrite(
+                self.task,
+                addr,
+                buf.len() as mach_vm_size_t,
+                buf.as_mut_ptr() as mach_vm_address_t,
+                &mut read,
+            )
+        };
+        if kr != KERN_SUCCESS {
+            return Err(mach_error(kr));
+        }
+        Ok(read as usize)
+    }
+
+    pub(crate) fn write_at(&self, addr: u64, buf: &[u8]) -> io::Result<()> {
+        let kr = self.raw_write(addr, buf);
+        if kr == KERN_SUCCESS {
+            return Ok(());
+        }
+        // A read-only page reports KERN_PROTECTION_FAILURE or, for
+        // mach_vm_write, KERN_INVALID_ADDRESS; protection_at tells the latter
+        // apart from a genuinely unmapped address.
+        if kr != KERN_PROTECTION_FAILURE && kr != KERN_INVALID_ADDRESS {
+            return Err(mach_error(kr));
+        }
+        // Read-only page: make it writable (copy-on-write for shared/file
+        // mappings), write, then put the original protection back.
+        let prot = self.protection_at(addr)?;
+        let page = page_size();
+        let start = addr & !(page - 1);
+        let len = (addr + buf.len() as u64).div_ceil(page) * page - start;
+        // SAFETY: changes protection of pages in the target only.
+        let kr = unsafe {
+            mach_vm_protect(
+                self.task,
+                start,
+                len,
+                0,
+                prot | VM_PROT_WRITE | VM_PROT_COPY,
+            )
+        };
+        if kr != KERN_SUCCESS {
+            return Err(mach_error(kr));
+        }
+        let written = self.raw_write(addr, buf);
+        // SAFETY: as above.
+        unsafe { mach_vm_protect(self.task, start, len, 0, prot) };
+        if written != KERN_SUCCESS {
+            return Err(mach_error(written));
+        }
+        Ok(())
+    }
+
+    fn raw_write(&self, addr: u64, buf: &[u8]) -> kern_return_t {
+        // SAFETY: the kernel reads buf.len() bytes from buf.
+        unsafe { mach_vm_write(self.task, addr, buf.as_ptr() as usize, buf.len() as u32) }
+    }
+
+    /// Current protection of the region containing `addr`.
+    fn protection_at(&self, addr: u64) -> io::Result<vm_prot_t> {
+        let mut start: mach_vm_address_t = addr;
+        let mut size: mach_vm_size_t = 0;
+        let mut info = vm_region_basic_info_64::default();
+        let mut count = vm_region_basic_info_64::count();
+        let mut object: mach_port_t = MACH_PORT_NULL;
+        // SAFETY: info/count describe a correctly sized out-buffer.
+        let kr = unsafe {
+            mach_vm_region(
+                self.task,
+                &mut start,
+                &mut size,
+                VM_REGION_BASIC_INFO_64,
+                &mut info as *mut _ as vm_region_info_t,
+                &mut count,
+                &mut object,
+            )
+        };
+        if kr != KERN_SUCCESS {
+            return Err(mach_error(kr));
+        }
+        if start > addr {
+            return Err(io::Error::other(format!("address {addr:#x} is not mapped")));
+        }
+        Ok(info.protection)
+    }
+}
+
+impl Drop for MemHandle {
+    fn drop(&mut self) {
+        // SAFETY: releases the send right task_for_pid gave us.
+        unsafe { mach_port_deallocate(mach_task_self(), self.task) };
+    }
+}
+
+pub(crate) fn accessible(pid: i32) -> bool {
+    MemHandle::open(pid).is_ok()
+}
+
+/// Walk the target's VM map, descending into submaps (e.g. the dyld shared
+/// cache), so the result is the flat, address-sorted list `/proc/<pid>/maps`
+/// would give on Linux.
+pub(crate) fn read_maps(pid: i32) -> io::Result<Vec<MemoryRegion>> {
+    let handle = MemHandle::open(pid)?;
+    let mut regions = Vec::new();
+    let mut addr: mach_vm_address_t = 0;
+    let mut depth: natural_t = 0;
+    loop {
+        let mut size: mach_vm_size_t = 0;
+        let mut info = vm_region_submap_info_64::default();
+        let mut count = vm_region_submap_info_64::count();
+        // SAFETY: info/count describe a correctly sized out-buffer.
+        let kr = unsafe {
+            mach_vm_region_recurse(
+                handle.task,
+                &mut addr,
+                &mut size,
+                &mut depth,
+                &mut info as *mut _ as vm_region_recurse_info_t,
+                &mut count,
+            )
+        };
+        if kr != KERN_SUCCESS {
+            break; // KERN_INVALID_ADDRESS: past the last region
+        }
+        if info.is_submap != 0 {
+            depth += 1;
+            continue;
+        }
+        let prot = info.protection;
+        regions.push(MemoryRegion {
+            start: addr,
+            end: addr + size,
+            read: prot & VM_PROT_READ != 0,
+            write: prot & VM_PROT_WRITE != 0,
+            exec: prot & VM_PROT_EXECUTE != 0,
+            shared: matches!(
+                info.share_mode,
+                SM_SHARED | SM_TRUESHARED | SM_SHARED_ALIASED
+            ),
+            path: region_path(pid, addr, info.user_tag),
+        });
+        addr += size;
+    }
+    Ok(regions)
+}
+
+/// The backing file of a region, or a Linux-style pseudo-name (`[heap]`,
+/// `[stack]`) derived from the anonymous region's tag so `RegionKind` works
+/// unchanged.
+fn region_path(pid: i32, addr: u64, user_tag: u32) -> String {
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: buf is PATH_MAX bytes; the call writes at most that many.
+    let n =
+        unsafe { libc::proc_regionfilename(pid, addr, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n > 0 {
+        return String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+    }
+    match user_tag {
+        VM_MEMORY_MALLOC_FIRST..=VM_MEMORY_MALLOC_LAST => "[heap]".into(),
+        VM_MEMORY_STACK => "[stack]".into(),
+        _ => String::new(),
+    }
+}
+
+fn page_size() -> u64 {
+    // SAFETY: sysconf is always safe to call.
+    let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if v > 0 {
+        v as u64
+    } else {
+        16384
+    }
+}
+
+// Replaced in task 3.
+pub(crate) fn raw_processes() -> Vec<RawProc> {
+    Vec::new()
+}
+
+// Replaced in task 3.
+pub(crate) fn environ(_pid: i32) -> Option<Vec<String>> {
+    None
+}
+
+/// Free + inactive physical memory, falling back to half of installed RAM.
+pub(crate) fn available_memory() -> Option<usize> {
+    let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: stats/count describe a correctly sized out-buffer.
+    let kr = unsafe {
+        libc::host_statistics64(
+            mach_host_self(),
+            libc::HOST_VM_INFO64,
+            &mut stats as *mut _ as libc::host_info64_t,
+            &mut count,
+        )
+    };
+    if kr == KERN_SUCCESS {
+        let pages = stats.free_count as u64 + stats.inactive_count as u64;
+        return Some((pages * page_size()) as usize);
+    }
+    let mut memsize: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: memsize/len describe a u64 out-buffer for hw.memsize.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            &mut memsize as *mut u64 as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0).then_some((memsize / 2) as usize)
+}
+
+pub(crate) const ELEVATION_TOOL: &str = "the macOS admin prompt";
+
+// Replaced in task 4.
+pub(crate) fn elevation_available() -> bool {
+    false
+}
+
+// Replaced in task 4.
+pub(crate) fn relaunch_elevated(_exe: &Path, _args: &[String]) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "elevation not implemented yet")
+}
