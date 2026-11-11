@@ -33,8 +33,9 @@ pub trait WizardBackend {
     fn module_offset(&self, addr: u64) -> Option<AddrExpr>;
     /// Run the pointer scanner for `addr`; returns the chain count.
     fn pointer_scan(&mut self, addr: u64) -> io::Result<usize>;
-    /// Filter the saved chains with the new address of the value.
-    fn filter_chains(&mut self, addr: u64) -> io::Result<usize>;
+    /// Keep the saved chains that land on any of `addrs` (the candidates
+    /// for the value after a restart); returns the chain count.
+    fn filter_chains(&mut self, addrs: &[u64]) -> io::Result<usize>;
     /// The chains still alive.
     fn chains(&self) -> Vec<PointerChain>;
     /// The pid of a running process with this name, if any.
@@ -80,8 +81,8 @@ pub enum Step {
         process: String,
     },
     /// Re-attached after a restart: `count` candidates for the new scan
-    /// (0 before the first scan). Needs `Value` / `Changed` until exactly one
-    /// candidate remains; then the chains are filtered.
+    /// (0 before the first scan). Needs `Value` / `Changed` until at most
+    /// `MAX_CANDIDATES` remain; then the chains are filtered with all of them.
     Refind {
         count: usize,
     },
@@ -287,14 +288,16 @@ impl Wizard {
         let refind = matches!(self.step, Step::Refind { .. });
         let count = match r {
             Err(e) => return self.fail_plain(format!("The scan failed: {e}.")),
-            Ok(0) => return self.fail_plain(format!("{none_msg} You can start over.")),
+            Ok(0) => return self.fail_plain(none_msg),
             Ok(n) => n,
         };
         if refind {
-            if count == 1 {
-                let addr = backend.candidates()[0];
-                self.chosen = Some(addr);
-                self.filter(addr, backend);
+            if count <= MAX_CANDIDATES {
+                let addrs = backend.candidates();
+                // The trait cannot tell which candidate a surviving chain
+                // lands on, so `chosen` is the first one.
+                self.chosen = addrs.first().copied();
+                self.filter(&addrs, backend);
             } else {
                 self.step = Step::Refind { count };
             }
@@ -305,8 +308,8 @@ impl Wizard {
         }
     }
 
-    fn filter(&mut self, addr: u64, backend: &mut dyn WizardBackend) {
-        match backend.filter_chains(addr) {
+    fn filter(&mut self, addrs: &[u64], backend: &mut dyn WizardBackend) {
+        match backend.filter_chains(addrs) {
             Err(e) => self.fail_plain(format!("Filtering the pointer chains failed: {e}.")),
             Ok(0) => self.fail_plain("No pointer chain survived the restart."),
             Ok(n) if n <= MAX_CHAINS => match backend.chains().first() {
@@ -481,8 +484,9 @@ mod tests {
         fn pointer_scan(&mut self, _: u64) -> io::Result<usize> {
             Ok(self.ptr)
         }
-        fn filter_chains(&mut self, a: u64) -> io::Result<usize> {
-            self.log.push(format!("filter {a:x}"));
+        fn filter_chains(&mut self, a: &[u64]) -> io::Result<usize> {
+            let a: Vec<String> = a.iter().map(|x| format!("{x:x}")).collect();
+            self.log.push(format!("filter {}", a.join(",")));
             self.filters.pop_front().unwrap_or(Ok(0))
         }
         fn chains(&self) -> Vec<PointerChain> {
@@ -728,19 +732,40 @@ mod tests {
     }
 
     #[test]
-    fn refind_narrows_until_one_candidate() {
+    fn refind_filters_with_all_candidates_when_few() {
         let mut b = base();
         let mut w = heap_to_wait(&mut b);
         b.running.push_back(Some(99));
-        b.first.push_back(Ok(4));
-        b.next.push_back(Ok(1));
-        b.cands = vec![0x9000];
+        b.first.push_back(Ok(2));
+        b.cands = vec![0x9000, 0x9100];
         b.filters.push_back(Ok(1));
         b.chains = vec![chain(1)];
         w.handle(Input::Restarted, &mut b);
         val(&mut w, &mut b, "7");
-        assert_eq!(w.step, Step::Refind { count: 4 });
+        assert!(b.log.contains(&"filter 9000,9100".to_string()));
+        assert_eq!(w.chosen_address(), Some(0x9000));
+        assert!(matches!(w.step, Step::Save { .. }));
+    }
+
+    #[test]
+    fn refind_keeps_narrowing_above_max_candidates() {
+        let mut b = base();
+        let mut w = heap_to_wait(&mut b);
+        b.running.push_back(Some(99));
+        b.first.push_back(Ok(40));
+        b.next.push_back(Ok(11));
+        b.next.push_back(Ok(10));
+        b.cands = vec![0x9000, 0x9100];
+        b.filters.push_back(Ok(1));
+        b.chains = vec![chain(1)];
+        w.handle(Input::Restarted, &mut b);
+        val(&mut w, &mut b, "7");
+        assert_eq!(w.step, Step::Refind { count: 40 });
         val(&mut w, &mut b, "8");
+        assert_eq!(w.step, Step::Refind { count: 11 });
+        assert!(b.log.iter().all(|l| !l.starts_with("filter")));
+        val(&mut w, &mut b, "9");
+        assert!(b.log.contains(&"filter 9000,9100".to_string()));
         assert!(matches!(w.step, Step::Save { .. }));
     }
 
@@ -750,7 +775,12 @@ mod tests {
         b.first.push_back(Ok(0));
         let mut w = Wizard::new(ScanType::I32);
         val(&mut w, &mut b, "1");
-        assert!(matches!(w.step, Step::Failed(ref m) if !m.is_empty()));
+        assert_eq!(
+            w.step,
+            Step::Failed(
+                "The value was not found in the game's memory. You can start over.".into()
+            )
+        );
         w.handle(Input::StartOver, &mut b);
         assert_eq!(w.step, Step::AskValue);
     }
