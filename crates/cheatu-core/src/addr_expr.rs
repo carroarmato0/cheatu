@@ -57,6 +57,7 @@ impl AddrExpr {
         let mut p = Parser {
             chars: s.chars().collect(),
             pos: 0,
+            depth: 0,
         };
         let expr = p.expr()?;
         p.skip_ws();
@@ -122,9 +123,14 @@ fn write_binary(l: &Expr, op: char, r: &Expr, f: &mut fmt::Formatter<'_>) -> fmt
     }
 }
 
+/// Deepest allowed nesting of `[...]` and `(...)`, so hostile input fails
+/// with an error instead of overflowing the stack.
+const MAX_DEPTH: usize = 64;
+
 struct Parser {
     chars: Vec<char>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -181,20 +187,26 @@ impl Parser {
             Some(c) if c.is_ascii_digit() => self.number(),
             Some('"') => Ok(Expr::Module(self.quoted("module name")?)),
             Some('[') => {
-                self.pos += 1;
-                let inner = self.expr()?;
-                self.expect(']')?;
+                let inner = self.nested(']')?;
                 Ok(Expr::Deref(Box::new(inner)))
             }
-            Some('(') => {
-                self.pos += 1;
-                let inner = self.expr()?;
-                self.expect(')')?;
-                Ok(inner)
-            }
+            Some('(') => self.nested(')'),
             Some(c) if c.is_alphabetic() || c == '_' => self.function(),
             _ => Err(self.error("expected a number, module, `[` or aob(".to_string())),
         }
+    }
+
+    /// Parse `expr close` after an opening bracket at the current position.
+    fn nested(&mut self, close: char) -> Result<Expr, ParseError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.error("expression nested too deeply".to_string()));
+        }
+        self.depth += 1;
+        self.pos += 1;
+        let inner = self.expr()?;
+        self.expect(close)?;
+        self.depth -= 1;
+        Ok(inner)
     }
 
     fn number(&mut self) -> Result<Expr, ParseError> {
@@ -412,6 +424,21 @@ mod tests {
         assert_eq!(e.column, 3);
         assert!(AddrExpr::parse("18446744073709551616").is_err());
         assert_eq!(p("18446744073709551615").0, Expr::Num(u64::MAX));
+    }
+
+    #[test]
+    fn nesting_depth_is_limited() {
+        let deep = "[".repeat(10_000);
+        let e = err(&deep);
+        assert_eq!(e.column, 65);
+        assert_eq!(e.message, "expression nested too deeply");
+        let e = err(&"(".repeat(10_000));
+        assert_eq!(e.message, "expression nested too deeply");
+
+        let ok = format!("{}1{}", "[".repeat(64), "]".repeat(64));
+        assert!(AddrExpr::parse(&ok).is_ok());
+        let too = format!("{}1{}", "[".repeat(65), "]".repeat(65));
+        assert_eq!(err(&too).column, 65);
     }
 
     #[test]
