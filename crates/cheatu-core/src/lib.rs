@@ -13,6 +13,7 @@
 //! it requires root. The [`privilege`] module helps relaunch the tool elevated
 //! (`pkexec` on Linux, the admin prompt on macOS) when needed.
 
+pub mod addr_expr;
 pub mod maps;
 pub mod mem;
 pub mod privilege;
@@ -21,7 +22,11 @@ pub mod scan;
 mod sys;
 pub mod value;
 
-pub use maps::{read_maps, region_for, MemoryRegion, RegionKind};
+pub use addr_expr::{AddrExpr, Expr, ParseError};
+pub use maps::{
+    module_base, module_containing, module_name, read_maps, region_for, MemoryRegion, ModuleError,
+    RegionKind,
+};
 pub use mem::{probe_address, Mem, ProbeOutcome};
 pub use process::{human_bytes, list_processes, resume, suspend, ProcInfo};
 pub use scan::{
