@@ -310,6 +310,28 @@ Manual:
   open the table, tick freeze: rupees at 200. Open a "shared" table and check
   that nothing is written before a freeze is ticked.
 
+## Measurements
+
+11/11/2026, `dmhost` running The Legend of Zelda: Ocarina of Time (resident
+size ~5.3 GiB), macOS Apple Silicon, as root, single-threaded throwaway
+measurement (read all read+write regions in 4 MiB chunks, count aligned 8-byte
+values pointing into readable memory):
+
+| Metric | Value |
+|---|---|
+| Read+write bytes scanned | 9.51 GiB (address space, more than resident) |
+| Pointer candidates | 41 334 476 |
+| Estimated pointer map (16 bytes each) | 0.62 GiB |
+| Time | 13.9 s |
+| Peak memory of the measurement | 12.2 MiB |
+| Failed 4 MiB chunk reads | 3 |
+
+Well within the limits set before building (8 GiB map, 120 s read), so the
+defaults stay: depth 5, max offset 0x1000, alignment 8, result cap 1 000 000.
+The disk-backed map is still needed: 0.62 GiB is too much to hold in the GUI's
+memory alongside the scanner. Unreadable chunks occur and must be skipped, not
+fail the build.
+
 ## Risks
 
 - **Pointer map size and speed** on large targets. Mitigated by the disk-backed
