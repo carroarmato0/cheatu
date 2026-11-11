@@ -254,7 +254,8 @@ CLI: `ptrscan <expr|hex> [depth] [max-offset]`, `ptrscan filter addr
 wizard that walks you through the whole flow without needing to know how
 memory scanners work. It uses its own scan, so the main results are left
 alone. Every long step shows what it is doing, with **Cancel** where it can
-stop; **Start over** is always available.
+stop. From the second step on, **Start over** takes you back to the
+beginning (it is unavailable while a step is working).
 
 1. **Find the value.** Pick the kind of number (4 Bytes for most counters) and
    enter the value the game shows now. Then change it in the game and enter the
@@ -269,8 +270,10 @@ stop; **Start over** is always available.
 3. **Make it last.** An address inside a module image is final
    (`"module"+offset`). Otherwise the wizard runs the
    [pointer scanner](#pointer-scanner) and asks you to restart the game. cheatu
-   stays open, checks every 2 seconds for a new process with the same name,
-   attaches to it (the main window follows, so the cheat table re-resolves),
+   stays open and checks every 2 seconds; once the old process has exited and
+   a new process with the same name has started (processes that already had
+   that name, such as a game's helper processes, do not count), it attaches to
+   it (the main window follows, so the cheat table re-resolves),
    and asks for the value again to filter the chains. This repeats until at
    most 3 chains are left, or you stop and keep the best one.
 4. **Save.** Give the cheat a name and a value, and choose whether it stays

@@ -43,12 +43,32 @@ pub fn plus_one(v: &ScanValue) -> Option<ScanValue> {
     })
 }
 
-/// The pid of the restarted game: a process called `name` that is not the
-/// one still attached (`old_pid`), which may not have exited yet.
-pub fn restarted_pid(procs: &[ProcInfo], name: &str, old_pid: i32) -> Option<i32> {
+/// The pids already called `name` when the wizard starts waiting for a
+/// restart, plus `old_pid`, sorted. None of them counts as the restarted
+/// game: multi-process games (NW.js/Electron renderers, Proton helpers) run
+/// several processes with the same name.
+pub fn known_pids(procs: &[ProcInfo], name: &str, old_pid: i32) -> Vec<i32> {
+    let mut pids: Vec<i32> = procs
+        .iter()
+        .filter(|p| p.name == name)
+        .map(|p| p.pid)
+        .chain(std::iter::once(old_pid))
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// The pid of the restarted game: once the old process (`old_pid`) is gone,
+/// a process called `name` that is not in `known` (see [`known_pids`]); the
+/// newest (highest pid) when there are several.
+pub fn restarted_pid(procs: &[ProcInfo], name: &str, old_pid: i32, known: &[i32]) -> Option<i32> {
+    if procs.iter().any(|p| p.pid == old_pid) {
+        return None;
+    }
     procs
         .iter()
-        .filter(|p| p.name == name && p.pid != old_pid)
+        .filter(|p| p.name == name && !known.contains(&p.pid))
         .map(|p| p.pid)
         .max()
 }
@@ -152,6 +172,10 @@ pub struct RealBackend {
     /// Values replaced by `poke`, for `restore`.
     poked: HashMap<u64, ScanValue>,
     chains: Vec<PointerChain>,
+    /// Pids that already carried the process name when the wizard started
+    /// waiting for a restart; recorded after each pointer scan and filter,
+    /// the steps that lead to `WaitRestart`.
+    known: Vec<i32>,
 }
 
 impl RealBackend {
@@ -169,6 +193,7 @@ impl RealBackend {
             ty: ScanType::I32,
             poked: HashMap::new(),
             chains: Vec::new(),
+            known: Vec::new(),
         })
     }
 
@@ -200,6 +225,12 @@ impl RealBackend {
     }
 
     /// The type a candidate is tracked as.
+    /// Record the pids that are not a restart of the game (see
+    /// [`known_pids`]).
+    fn record_known(&mut self) {
+        self.known = known_pids(&list_processes(), &self.process, self.pid());
+    }
+
     fn ty_at(&self, addr: u64) -> ScanType {
         self.scanner
             .results()
@@ -282,6 +313,7 @@ impl WizardBackend for RealBackend {
         self.activity.set(Stage::Search);
         let found = find_chains(&map, &self.live, addr, &settings, &self.activity.search)?;
         self.chains = found.chains;
+        self.record_known();
         Ok(self.chains.len())
     }
 
@@ -289,9 +321,9 @@ impl WizardBackend for RealBackend {
         self.activity.set(Stage::Filter);
         self.refresh();
         let live = &self.live;
-        Ok(keep_landing(&mut self.chains, addrs, |c| {
-            c.resolve(live).ok()
-        }))
+        let n = keep_landing(&mut self.chains, addrs, |c| c.resolve(live).ok());
+        self.record_known();
+        Ok(n)
     }
 
     /// Shortest chain first, so the wizard saves the simplest one.
@@ -302,7 +334,7 @@ impl WizardBackend for RealBackend {
     }
 
     fn process_running(&self, name: &str) -> Option<i32> {
-        restarted_pid(&list_processes(), name, self.pid())
+        restarted_pid(&list_processes(), name, self.pid(), &self.known)
     }
 
     fn reattach(&mut self, pid: i32) -> io::Result<()> {
@@ -1048,17 +1080,32 @@ mod tests {
     }
 
     #[test]
-    fn restarted_pid_skips_the_old_process() {
-        let procs = [proc(10, "game"), proc(11, "other"), proc(12, "game")];
-        assert_eq!(restarted_pid(&procs, "game", 10), Some(12));
-        assert_eq!(restarted_pid(&procs, "game", 12), Some(10));
-        // The old game is still running and nothing new has started.
-        assert_eq!(restarted_pid(&procs[..2], "game", 10), None);
-        assert_eq!(restarted_pid(&procs, "gam", 10), None, "exact name");
-        assert_eq!(restarted_pid(&procs, "missing", 10), None);
+    fn restart_ignores_siblings_and_waits_for_the_old_game_to_exit() {
+        let at_wait = [proc(10, "game"), proc(11, "other"), proc(12, "game")];
+        // Recorded when the wizard starts waiting: the old game and its
+        // same-named sibling (a renderer, a Proton helper).
+        let known = known_pids(&at_wait, "game", 10);
+        assert_eq!(known, vec![10, 12]);
+        assert_eq!(
+            known_pids(&at_wait[..2], "game", 10),
+            vec![10],
+            "old pid always in"
+        );
+
+        // Nothing changed: the sibling is not a restart.
+        assert_eq!(restarted_pid(&at_wait, "game", 10, &known), None);
+        // The old game is still alive: no restart, even with a new process.
+        let both = [proc(10, "game"), proc(12, "game"), proc(40, "game")];
+        assert_eq!(restarted_pid(&both, "game", 10, &known), None);
+        // The old game is gone and a new one is up: that one.
+        let after = [proc(12, "game"), proc(40, "game"), proc(41, "other")];
+        assert_eq!(restarted_pid(&after, "game", 10, &known), Some(40));
+        // Old gone, only the sibling left: keep waiting.
+        assert_eq!(restarted_pid(&after[..1], "game", 10, &known), None);
+        assert_eq!(restarted_pid(&after, "gam", 10, &known), None, "exact name");
         // Several new ones: the newest (highest pid).
-        let procs = [proc(10, "game"), proc(30, "game"), proc(20, "game")];
-        assert_eq!(restarted_pid(&procs, "game", 10), Some(30));
+        let many = [proc(12, "game"), proc(50, "game"), proc(45, "game")];
+        assert_eq!(restarted_pid(&many, "game", 10, &known), Some(50));
     }
 
     fn chain(off: u64) -> PointerChain {
