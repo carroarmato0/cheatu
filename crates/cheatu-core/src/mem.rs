@@ -1,32 +1,32 @@
-//! Reading and writing another process's memory via `/proc/<pid>/mem`.
+//! Reading and writing another process's memory.
 //!
-//! `read_at`/`write_at` seek to the target virtual address and transfer bytes.
-//! This works when the caller is root or holds `CAP_SYS_PTRACE` with a
-//! permissive `yama/ptrace_scope`; otherwise `open` fails with `EACCES`.
+//! `read_at`/`write_at` transfer bytes at a target virtual address. On Linux
+//! this goes through `/proc/<pid>/mem` and works when the caller is root or
+//! holds `CAP_SYS_PTRACE` with a permissive `yama/ptrace_scope`; on macOS it
+//! uses the target's Mach task port, which needs root for other processes.
+//! Otherwise `open` fails with `PermissionDenied`.
 
-use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::FileExt;
 use std::time::Duration;
+
+use crate::sys;
 
 /// An open handle to a process's address space.
 pub struct Mem {
     pid: i32,
-    file: File,
+    handle: sys::MemHandle,
 }
 
 impl Mem {
-    /// Open `/proc/<pid>/mem` for reading and writing.
+    /// Open `pid`'s address space for reading and (where allowed) writing.
     ///
-    /// Falls back to read-only if the process disallows writes, so that
-    /// scanning still works even when patching does not.
+    /// On Linux this falls back to read-only if the process disallows writes,
+    /// so that scanning still works even when patching does not.
     pub fn open(pid: i32) -> io::Result<Mem> {
-        let path = format!("/proc/{pid}/mem");
-        let file = match OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(f) => f,
-            Err(_) => OpenOptions::new().read(true).open(&path)?,
-        };
-        Ok(Mem { pid, file })
+        Ok(Mem {
+            pid,
+            handle: sys::MemHandle::open(pid)?,
+        })
     }
 
     pub fn pid(&self) -> i32 {
@@ -38,13 +38,13 @@ impl Mem {
     /// Returns the number of bytes read; a short read (or `Err`) usually means
     /// the region is unmapped or unreadable, and callers should skip it.
     pub fn read_at(&self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.file.read_at(buf, addr)
+        self.handle.read_at(addr, buf)
     }
 
     /// Write `buf` at virtual address `addr`. Requires write permission on the
     /// target (root or `CAP_SYS_PTRACE`).
     pub fn write_at(&self, addr: u64, buf: &[u8]) -> io::Result<()> {
-        self.file.write_all_at(buf, addr)
+        self.handle.write_at(addr, buf)
     }
 }
 
@@ -104,12 +104,8 @@ pub fn probe_address(
     }
 }
 
-/// Whether `/proc/<pid>/mem` can be opened for reading — i.e. whether scanning
-/// `pid` would succeed without elevation. The kernel's ptrace-access check runs
-/// at `open`, so this is the ground truth; it reads nothing and drops the handle.
+/// Whether `pid`'s memory can be opened now — i.e. whether scanning `pid`
+/// would succeed without elevation. Reads nothing.
 pub fn accessible(pid: i32) -> bool {
-    OpenOptions::new()
-        .read(true)
-        .open(format!("/proc/{pid}/mem"))
-        .is_ok()
+    sys::accessible(pid)
 }

@@ -138,7 +138,7 @@ impl Repl {
             println!("already running as root.");
             return;
         }
-        if !privilege::pkexec_available() {
+        if !privilege::elevation_available() {
             println!("pkexec not found; install polkit or run via sudo.");
             return;
         }

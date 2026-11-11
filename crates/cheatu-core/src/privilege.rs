@@ -1,13 +1,14 @@
 //! Privilege checks and re-launching with elevated rights.
 //!
 //! Scanning another user's (or a same-user but non-child) process's memory
-//! requires root or `CAP_SYS_PTRACE`. We use `pkexec` (polkit) to request
-//! elevation, which shows the standard graphical/terminal auth prompt on KDE,
-//! GNOME, and most other desktops.
+//! requires root (or `CAP_SYS_PTRACE` on Linux). On Linux we use `pkexec`
+//! (polkit) to request elevation, which shows the standard graphical/terminal
+//! auth prompt on KDE, GNOME, and most other desktops. On macOS we use the
+//! native administrator prompt.
 
 use std::io;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
+
+use crate::sys;
 
 /// Guard flag we append when relaunching, to avoid infinite elevation loops.
 pub const ELEVATED_FLAG: &str = "--already-elevated";
@@ -21,13 +22,20 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Whether `pkexec` is available to request elevation.
-pub fn pkexec_available() -> bool {
-    which("pkexec").is_some()
+/// Whether elevation can be requested (`pkexec` on Linux, the admin prompt on
+/// macOS).
+pub fn elevation_available() -> bool {
+    sys::elevation_available()
 }
 
-/// Re-exec this program through `pkexec`, forwarding the current arguments plus
-/// the display environment so a GUI can still reach the user's session.
+/// The elevation mechanism, for user-facing messages: `"pkexec"` on Linux,
+/// `"the macOS admin prompt"` on macOS.
+pub fn elevation_tool() -> &'static str {
+    sys::ELEVATION_TOOL
+}
+
+/// Relaunch this program elevated (`pkexec` on Linux, the admin prompt on
+/// macOS), forwarding the current arguments.
 /// `extra_args` are appended after the forwarded ones (e.g. an [`ATTACH_FLAG`]
 /// pid so the elevated instance re-attaches to the target).
 ///
@@ -56,35 +64,9 @@ pub fn relaunch_elevated(extra_args: &[String]) -> io::Error {
     }
     args.extend_from_slice(extra_args);
 
-    let mut cmd = Command::new("pkexec");
-    // `pkexec` scrubs the environment, so re-inject the vars a GUI needs to
-    // connect to the running Wayland/X11 session via `env`. HOME and
-    // XDG_CONFIG_HOME keep config lookups (e.g. the saved theme) pointing at
-    // the invoking user's files instead of /root's.
-    cmd.arg("env");
-    for key in [
-        "HOME",
-        "XDG_CONFIG_HOME",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XDG_RUNTIME_DIR",
-        "XAUTHORITY",
-        "XDG_SESSION_TYPE",
-        "XCURSOR_SIZE",
-        "XCURSOR_THEME",
-        "QT_QPA_PLATFORM",
-        "GDK_BACKEND",
-    ] {
-        if let Ok(val) = std::env::var(key) {
-            cmd.arg(format!("{key}={val}"));
-        }
-    }
-    cmd.arg(exe);
-    cmd.args(&args);
-    cmd.arg(ELEVATED_FLAG);
+    args.push(ELEVATED_FLAG.to_string());
 
-    // exec() only returns if it fails.
-    cmd.exec()
+    sys::relaunch_elevated(&exe, &args)
 }
 
 /// Whether this invocation is the post-elevation relaunch (guard flag present).
@@ -102,12 +84,4 @@ pub fn attach_target() -> Option<i32> {
         }
     }
     None
-}
-
-/// Minimal `which`: look up `name` on `PATH`.
-fn which(name: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
 }

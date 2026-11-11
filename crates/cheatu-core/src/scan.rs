@@ -941,16 +941,8 @@ fn scan_unknown_range(
 ///
 // ponytail: MemAvailable read once per scan; good enough, no watchdog.
 fn candidate_cap() -> usize {
-    const FALLBACK: usize = 8 << 30; // 8 GiB if /proc/meminfo is unreadable
-    let available = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find_map(|l| l.strip_prefix("MemAvailable:"))
-                .and_then(|rest| rest.split_whitespace().next()?.parse::<usize>().ok())
-                .map(|kb| kb * 1024)
-        })
-        .unwrap_or(FALLBACK);
+    const FALLBACK: usize = 8 << 30; // 8 GiB if available memory is unknown
+    let available = crate::sys::available_memory().unwrap_or(FALLBACK);
     (available / 4) / std::mem::size_of::<Candidate>()
 }
 

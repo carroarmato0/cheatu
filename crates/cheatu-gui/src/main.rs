@@ -1825,7 +1825,7 @@ impl eframe::App for CheatuApp {
                     // elevated and re-attach to the same target in one click.
                     if let Some(pid) = self.needs_elevation {
                         if !privilege::is_root()
-                            && privilege::pkexec_available()
+                            && privilege::elevation_available()
                             && ui
                                 .add(egui::Button::new("🔒 Elevate & attach"))
                                 .on_hover_text(
@@ -2750,7 +2750,7 @@ impl eframe::App for CheatuApp {
             self.show_picker = false;
         }
         if do_elevate {
-            if privilege::pkexec_available() {
+            if privilege::elevation_available() {
                 self.status = "Requesting elevation via pkexec…".into();
                 // Carry the target pid so the elevated instance re-attaches.
                 let extra: Vec<String> = match elevate_for {

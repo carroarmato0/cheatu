@@ -9,14 +9,16 @@
 //!   * check for / request elevated privileges ([`privilege`])
 //!
 //! On Linux, reading another process's memory requires either running as root
-//! or holding `CAP_SYS_PTRACE` (and a permissive `yama/ptrace_scope`). The
-//! [`privilege`] module helps relaunch the tool via `pkexec` when needed.
+//! or holding `CAP_SYS_PTRACE` (and a permissive `yama/ptrace_scope`); on macOS
+//! it requires root. The [`privilege`] module helps relaunch the tool elevated
+//! (`pkexec` on Linux, the admin prompt on macOS) when needed.
 
 pub mod maps;
 pub mod mem;
 pub mod privilege;
 pub mod process;
 pub mod scan;
+mod sys;
 pub mod value;
 
 pub use maps::{read_maps, region_for, MemoryRegion, RegionKind};
