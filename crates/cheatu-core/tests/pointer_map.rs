@@ -331,6 +331,6 @@ fn default_settings() {
             s.max_results,
             s.chunk_entries
         ),
-        (5, 0x1000, 8, 1_000_000, 64 * 1024 * 1024)
+        (5, 0x1000, 8, 1_000_000, 4 * 1024 * 1024)
     );
 }

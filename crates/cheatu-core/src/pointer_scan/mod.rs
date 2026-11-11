@@ -20,7 +20,7 @@ pub struct PtrScanSettings {
     /// Stop after this many chains.
     pub max_results: usize,
     /// Records sorted in memory before a run is written to disk (16 bytes
-    /// each, so the default bounds the sort buffer at 1 GiB).
+    /// each, so the default bounds the sort buffer at 64 MiB).
     pub chunk_entries: usize,
 }
 
@@ -31,7 +31,7 @@ impl Default for PtrScanSettings {
             max_offset: 0x1000,
             alignment: 8,
             max_results: 1_000_000,
-            chunk_entries: 64 * 1024 * 1024,
+            chunk_entries: 4 * 1024 * 1024,
         }
     }
 }
