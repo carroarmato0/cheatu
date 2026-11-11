@@ -6,6 +6,7 @@
 #                make deb | rpm | appimage    (one format, in a container)
 #                make flatpak | snap          (host tools: flatpak-builder / snapcraft)
 #                make aur-srcinfo             (regenerate packaging/aur/.SRCINFO)
+#                make macos-app               (dist/cheatu.app, on a Mac)
 #
 # Run `make help` for the annotated list.
 
@@ -147,6 +148,14 @@ flatpak-sources: ## Regenerate offline cargo-sources.json for Flathub
 .PHONY: snap
 snap: ## Build the snap (needs snapcraft)
 	snapcraft pack --output dist/cheatu_$(VERSION)_amd64.snap
+
+# ---------------------------------------------------------------------------
+# macOS (run on a Mac)
+# ---------------------------------------------------------------------------
+
+.PHONY: macos-app
+macos-app: ## Build dist/cheatu.app (macOS only)
+	packaging/macos/build-app.sh $(VERSION)
 
 # ---------------------------------------------------------------------------
 # AUR

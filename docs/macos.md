@@ -15,6 +15,16 @@ cargo build --release
 # binaries: target/release/{cheatu, cheatu-gui, cheatu-inject}
 ```
 
+For the GUI, build an app bundle instead of running the bare binary:
+
+```sh
+make macos-app        # → dist/cheatu.app (ad-hoc signed)
+open dist/cheatu.app  # or drag it to /Applications
+```
+
+The bundle carries the cheatu icon, so the Dock shows it for the elevated
+instance too; a bare `cheatu-gui` running as root gets the generic "exec" icon.
+
 ## Privileges
 
 macOS only hands out another process's memory (its Mach *task port*) to
