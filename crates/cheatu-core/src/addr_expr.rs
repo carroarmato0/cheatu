@@ -14,6 +14,10 @@ use std::fmt;
 
 use crate::scan::parse_aob;
 
+/// Longest accepted expression text, in characters. Together with the nesting
+/// limit this bounds the depth of the parsed tree.
+pub const MAX_EXPR_LEN: usize = 1024;
+
 /// A node of a parsed address expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
@@ -54,8 +58,15 @@ impl std::error::Error for ParseError {}
 impl AddrExpr {
     /// Parse an expression. Whitespace between tokens is ignored.
     pub fn parse(s: &str) -> Result<AddrExpr, ParseError> {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() > MAX_EXPR_LEN {
+            return Err(ParseError {
+                column: MAX_EXPR_LEN + 1,
+                message: format!("expression too long (over {MAX_EXPR_LEN} characters)"),
+            });
+        }
         let mut p = Parser {
-            chars: s.chars().collect(),
+            chars,
             pos: 0,
             depth: 0,
         };
@@ -428,17 +439,35 @@ mod tests {
 
     #[test]
     fn nesting_depth_is_limited() {
-        let deep = "[".repeat(10_000);
+        let deep = "[".repeat(1000);
         let e = err(&deep);
         assert_eq!(e.column, 65);
         assert_eq!(e.message, "expression nested too deeply");
-        let e = err(&"(".repeat(10_000));
+        let e = err(&"(".repeat(1000));
         assert_eq!(e.message, "expression nested too deeply");
 
         let ok = format!("{}1{}", "[".repeat(64), "]".repeat(64));
         assert!(AddrExpr::parse(&ok).is_ok());
         let too = format!("{}1{}", "[".repeat(65), "]".repeat(65));
         assert_eq!(err(&too).column, 65);
+    }
+
+    #[test]
+    fn length_is_capped() {
+        let e = err(&"1".repeat(1025));
+        assert_eq!(e.column, 1025);
+        assert_eq!(e.message, "expression too long (over 1024 characters)");
+        // Counted in characters, not bytes.
+        assert!(AddrExpr::parse(&format!("\"{}\"", "ゼ".repeat(1022))).is_ok());
+
+        let chain = format!("{} ", "1+".repeat(511) + "1");
+        assert_eq!(chain.chars().count(), 1024);
+        // Canonical output uses `0x` prefixes, so it can be longer than the
+        // input; compare it with the 512-term chain rather than re-parsing.
+        let parsed = p(&chain);
+        assert_eq!(parsed.to_string(), vec!["0x1"; 512].join("+"));
+        let short = p(&vec!["1"; 200].join("+"));
+        assert_eq!(p(&short.to_string()), short);
     }
 
     #[test]
