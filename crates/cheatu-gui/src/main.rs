@@ -236,6 +236,7 @@ fn wine_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
 
 /// XDG base-dir spec: $XDG_CONFIG_HOME/cheatu/config.json, falling back to
 /// ~/.config/cheatu/config.json (relative XDG_CONFIG_HOME must be ignored).
+#[cfg(not(target_os = "macos"))]
 fn config_path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -243,6 +244,12 @@ fn config_path() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".config"))
         .join("cheatu")
         .join("config.json")
+}
+
+/// ~/Library/Application Support/cheatu/config.json, the macOS convention.
+#[cfg(target_os = "macos")]
+fn config_path() -> PathBuf {
+    home_dir().join("Library/Application Support/cheatu/config.json")
 }
 
 fn load_theme() -> Theme {
@@ -296,6 +303,9 @@ fn cjk_font_path() -> Option<PathBuf> {
         "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
         "/usr/share/fonts/adobe-source-han-sans/SourceHanSans-Regular.otc",
         "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+        // macOS system fonts: CJK ideographs + kana, then Hangul.
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
     ]
     .into_iter()
     .map(PathBuf::from)
@@ -1828,9 +1838,10 @@ impl eframe::App for CheatuApp {
                             && privilege::elevation_available()
                             && ui
                                 .add(egui::Button::new("🔒 Elevate & attach"))
-                                .on_hover_text(
-                                    "Relaunch with root via pkexec and re-attach to this process",
-                                )
+                                .on_hover_text(format!(
+                                    "Relaunch with root via {} and re-attach to this process",
+                                    privilege::elevation_tool()
+                                ))
                                 .clicked()
                         {
                             do_elevate = true;
@@ -2751,7 +2762,7 @@ impl eframe::App for CheatuApp {
         }
         if do_elevate {
             if privilege::elevation_available() {
-                self.status = "Requesting elevation via pkexec…".into();
+                self.status = format!("Requesting elevation via {}…", privilege::elevation_tool());
                 // Carry the target pid so the elevated instance re-attaches.
                 let extra: Vec<String> = match elevate_for {
                     Some(pid) => vec![privilege::ATTACH_FLAG.to_string(), pid.to_string()],
@@ -2907,6 +2918,12 @@ fn read_current(scanner: &Scanner, addr: u64, ty: ScanType) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn config_lives_in_application_support_on_macos() {
+        assert!(config_path().ends_with("Library/Application Support/cheatu/config.json"));
+    }
 
     fn addrs(app: &CheatuApp) -> Vec<u64> {
         app.display.iter().map(|d| d.addr).collect()

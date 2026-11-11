@@ -23,12 +23,19 @@ fn main() {
         }
     }
 
-    println!(
-        "cheatu {} — Linux memory scanner",
-        env!("CARGO_PKG_VERSION")
-    );
+    let os = if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "Linux"
+    };
+    println!("cheatu {} — {os} memory scanner", env!("CARGO_PKG_VERSION"));
     if privilege::is_root() {
         println!("running with root privileges.");
+    } else if cfg!(target_os = "macos") {
+        println!(
+            "note: not running as root; reading game memory usually needs it.\n\
+             restart with `sudo cheatu` to scan other processes."
+        );
     } else {
         println!(
             "note: not running as root; reading game memory usually needs it.\n\
@@ -136,6 +143,12 @@ impl Repl {
     fn elevate(&mut self) {
         if privilege::is_root() {
             println!("already running as root.");
+            return;
+        }
+        // An elevated relaunch from the admin prompt would run detached from
+        // this terminal, so on macOS the CLI is restarted under sudo instead.
+        if cfg!(target_os = "macos") {
+            println!("on macOS, restart cheatu with: sudo cheatu");
             return;
         }
         if !privilege::elevation_available() {
@@ -472,9 +485,14 @@ commands:
   setall <value>       write value to every candidate
   write <addr> <value> write value to a hex address directly (uses the concrete type)
   reset                clear the candidate list
-  sudo                 relaunch with root privileges (via pkexec)
+  {}
   help                 this help
-  quit                 exit"
+  quit                 exit",
+        if cfg!(target_os = "macos") {
+            "sudo                 explain how to run with root privileges"
+        } else {
+            "sudo                 relaunch with root privileges (via pkexec)"
+        }
     );
 }
 
