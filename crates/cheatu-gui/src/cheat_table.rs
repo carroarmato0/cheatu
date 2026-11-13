@@ -336,6 +336,13 @@ pub fn savable_value(ty: ScanType, s: &str) -> bool {
 }
 
 /// Pids of running processes whose name is exactly `name`.
+/// A cheat for this address and type is already in My cheats.
+pub fn already_saved(saved: &[GuiEntry], addr: u64, ty: ScanType) -> bool {
+    saved
+        .iter()
+        .any(|e| e.resolved == Ok(addr) && e.entry.ty == ty)
+}
+
 pub fn processes_named(procs: &[ProcInfo], name: &str) -> Vec<i32> {
     procs
         .iter()
@@ -347,6 +354,20 @@ pub fn processes_named(procs: &[ProcInfo], name: &str) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_add_is_detected() {
+        let entry = entry_for_address(&[], 0x1000, ScanType::I32);
+        let mut e = GuiEntry::new(entry, false);
+        e.resolved = Ok(0x1000);
+        let saved = vec![e];
+        assert!(already_saved(&saved, 0x1000, ScanType::I32));
+        assert!(
+            !already_saved(&saved, 0x1000, ScanType::F32),
+            "another type is another cheat"
+        );
+        assert!(!already_saved(&saved, 0x2000, ScanType::I32));
+    }
 
     fn entry(expr: &str, frozen: bool) -> GuiEntry {
         let mut e = GuiEntry::new(

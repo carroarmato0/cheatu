@@ -1498,7 +1498,7 @@ impl CheatuApp {
         let text = self.value_text.trim();
         if !first {
             if !scanner.has_scanned() {
-                return Some("Do a first scan before narrowing.");
+                return Some("Search first, then narrow down.");
             }
             return (self.next_mode.needs_value() && text.parse::<f64>().is_err())
                 .then_some("Enter a value for this comparison.");
@@ -1514,7 +1514,7 @@ impl CheatuApp {
             // An unknown-value scan keeps every address, so it needs no value.
             _ if self.unknown_initial => None,
             _ => (cheatu_core::parse_range(text).is_none() && text.parse::<f64>().is_err())
-                .then_some("Enter a value to scan for, e.g. 100 — or a range, 6400000..6500000."),
+                .then_some("Enter a value to search for, e.g. 100 — or a range, 6400000..6500000."),
         }
     }
 
@@ -1568,7 +1568,7 @@ impl CheatuApp {
                 }),
                 _ => {
                     self.status =
-                        "Enter a value to scan for, e.g. 100 — or a range, 6400000..6500000."
+                        "Enter a value to search for, e.g. 100 — or a range, 6400000..6500000."
                             .into();
                     self.scanner = Some(scanner);
                     return;
@@ -1576,7 +1576,7 @@ impl CheatuApp {
             }
         } else {
             if !scanner.has_scanned() {
-                self.status = "Do a first scan before narrowing.".into();
+                self.status = "Search first, then narrow down.".into();
                 self.scanner = Some(scanner);
                 return;
             }
@@ -2298,7 +2298,7 @@ impl eframe::App for CheatuApp {
         // Some(pid) to elevate-then-attach; None for a plain elevation request.
         let mut elevate_for: Option<i32> = None;
         let mut do_refresh_procs = false;
-        let mut add_to_table: Vec<(u64, ScanType)> = Vec::new();
+        let mut add_to_table: Vec<(u64, ScanType, egui::Rect)> = Vec::new();
         let mut remove_from_table: Vec<usize> = Vec::new();
         let mut clear_table = false;
         let mut open_dialog: Option<DialogPurpose> = None;
@@ -2966,70 +2966,78 @@ impl eframe::App for CheatuApp {
                         });
                         ui.end_row();
 
-                        ui.label("Next scan");
-                        ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt("next_mode")
-                                .selected_text(self.next_mode.label())
-                                .show_ui(ui, |ui| {
-                                    for m in NextMode::ALL {
-                                        ui.selectable_value(&mut self.next_mode, m, m.label());
-                                    }
-                                });
-                            if !self.next_mode.needs_value() {
-                                ui.label(
-                                    egui::RichText::new("ignores the value box").weak().small(),
-                                );
-                            }
-                        });
-                        ui.end_row();
+                        if show_narrow(has_scanned) {
+                            ui.label("Compare");
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("next_mode")
+                                    .selected_text(self.next_mode.label())
+                                    .show_ui(ui, |ui| {
+                                        for m in NextMode::ALL {
+                                            ui.selectable_value(&mut self.next_mode, m, m.label());
+                                        }
+                                    });
+                                if !self.next_mode.needs_value() {
+                                    ui.label(
+                                        egui::RichText::new("ignores the value box").weak().small(),
+                                    );
+                                }
+                            });
+                            ui.end_row();
+                        }
                     });
 
                 ui.add_space(6.0);
+                let narrow = show_narrow(has_scanned);
                 ui.horizontal(|ui| {
-                    // Disabled with the reason on hover, rather than letting the
-                    // click through to a rejection in the status bar.
+                    // Disabled with the reason shown below, rather than letting
+                    // the click through to a rejection in the status bar.
                     if ui
-                        .add_enabled(first_block.is_none(), egui::Button::new("🔍 First scan"))
-                        .on_hover_text("Scan the whole process for this value")
-                        .on_disabled_hover_text(first_block.unwrap_or_default())
+                        .add_enabled(first_block.is_none(), egui::Button::new("🔍 Search"))
+                        .on_hover_text("Search the whole game for this value")
                         .clicked()
                     {
                         do_first = true;
                     }
-                    if ui
-                        .add_enabled(next_block.is_none(), egui::Button::new("Next scan"))
-                        .on_hover_text("Narrow the current results")
-                        .on_disabled_hover_text(next_block.unwrap_or_default())
-                        .clicked()
-                    {
-                        do_next = true;
-                    }
-                    if ui
-                        .button("New scan")
-                        .on_hover_text("Clear results")
-                        .clicked()
-                    {
-                        do_reset = true;
-                    }
-                    let can_undo =
-                        !self.scanning && self.scanner.as_ref().is_some_and(|s| s.can_undo());
-                    if ui
-                        .add_enabled(can_undo, egui::Button::new("↩ Undo"))
-                        .on_hover_text("Restore the results from before the last scan")
-                        .clicked()
-                    {
-                        do_undo = true;
+                    if narrow {
+                        if ui
+                            .add_enabled(next_block.is_none(), egui::Button::new("Narrow down"))
+                            .on_hover_text("Keep the results that match the comparison")
+                            .clicked()
+                        {
+                            do_next = true;
+                        }
+                        if ui
+                            .button("New search")
+                            .on_hover_text("Clear the results")
+                            .clicked()
+                        {
+                            do_reset = true;
+                        }
+                        let can_undo =
+                            !self.scanning && self.scanner.as_ref().is_some_and(|s| s.can_undo());
+                        if ui
+                            .add_enabled(can_undo, egui::Button::new("↩ Undo"))
+                            .on_hover_text("Restore the results from before the last step")
+                            .clicked()
+                        {
+                            do_undo = true;
+                        }
                     }
                 });
+                // Why a button is disabled, in plain sight.
+                let reason = if narrow { next_block } else { first_block };
+                if let Some(r) = reason.filter(|_| !busy) {
+                    ui.label(egui::RichText::new(r).small().weak());
+                }
 
                 ui.add_space(4.0);
                 ui.checkbox(
                     &mut self.pause_while_scanning,
-                    "Pause target while scanning",
+                    "Pause the game while searching",
                 )
                 .on_hover_text(
-                    "Suspend the process (SIGSTOP) during the scan so values hold \
-                     still and reads are consistent. Resumes right after.",
+                    "Suspend the game (SIGSTOP) during a search so values hold still \
+                         and reads are consistent. It resumes right after.",
                 );
             });
 
@@ -3057,7 +3065,7 @@ impl eframe::App for CheatuApp {
                 }
                 // Probing one row at a time is fine for three candidates and
                 // tedious for thirty, which is exactly when you need it.
-                if self.enable_probe {
+                if (self.enable_probe || self.advanced) && !self.display.is_empty() {
                     let n = self.display.len().min(PROBE_BATCH_MAX);
                     if ui
                         .add_enabled(
@@ -3077,7 +3085,10 @@ impl eframe::App for CheatuApp {
             // The probe is the only thing here that tells two same-region
             // candidates apart, and it's invisible until switched on — say so
             // once the list is short enough that it's the obvious next step.
-            if !self.enable_probe && self.result_count > 1 && self.result_count <= HINT_THRESHOLD {
+            if !(self.enable_probe || self.advanced)
+                && self.result_count > 1
+                && self.result_count <= HINT_THRESHOLD
+            {
                 ui.label(
                     egui::RichText::new(
                         "Can't tell these apart? Turn on “Enable probe” in ⚙ Settings — it \
@@ -3095,7 +3106,8 @@ impl eframe::App for CheatuApp {
             // Hidden for huge lists and AoB/string scans; see `rebuild_display`.
             let show_hints = self.show_hints;
             // Auto-probe state, hoisted so the row closure needn't borrow &mut self.
-            let enable_probe = self.enable_probe;
+            // The scanner (Advanced) always offers the probe.
+            let enable_probe = self.enable_probe || self.advanced;
             let probe_busy = self.scanning || self.probe_pending.is_some();
             let probe_results = &self.probe_results;
             let saved = &self.saved;
@@ -3214,8 +3226,9 @@ impl eframe::App for CheatuApp {
                             });
                         }
                         row.col(|ui| {
-                            if ui.button("+").on_hover_text("Add to cheat table").clicked() {
-                                add_to_table.push((d.addr, ty));
+                            let plus = ui.button("+").on_hover_text("Add to My cheats");
+                            if plus.clicked() {
+                                add_to_table.push((d.addr, ty, plus.rect));
                             }
                             if enable_probe {
                                 let frozen = saved
@@ -3553,15 +3566,12 @@ impl eframe::App for CheatuApp {
         if do_undo {
             self.undo_scan();
         }
-        for (addr, ty) in add_to_table {
-            // Avoid duplicates (same address + type).
-            if self
-                .saved
-                .iter()
-                .any(|e| e.resolved == Ok(addr) && e.entry.ty == ty)
-            {
+        for (addr, ty, at) in add_to_table {
+            if cheat_table::already_saved(&self.saved, addr, ty) {
+                self.feedback.ok(at, "Already in My cheats", Instant::now());
                 continue;
             }
+            self.feedback.ok(at, "✔ Added to My cheats", Instant::now());
             // `"module"+offset` when the address is in a module's image, so
             // the entry still works after the game restarts.
             let mut entry = match self.fresh_live() {
@@ -3668,6 +3678,12 @@ impl eframe::App for CheatuApp {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
     }
+}
+
+/// The comparison, Narrow down and Undo only mean something after a first
+/// search.
+fn show_narrow(has_scanned: bool) -> bool {
+    has_scanned
 }
 
 /// A borderless, clickable column header that shows a ⬇ marker when active.
@@ -3824,6 +3840,12 @@ mod tests {
     /// The scan buttons are enabled exactly when `start_scan` would accept the
     /// inputs — a click should never reach a rejection in the status bar.
     #[test]
+    fn narrow_controls_hidden_before_first_search() {
+        assert!(!show_narrow(false));
+        assert!(show_narrow(true));
+    }
+
+    #[test]
     fn scan_blocker_tracks_what_the_inputs_allow() {
         let mut app = CheatuApp::default();
         assert!(app.scan_blocker(true).is_some(), "nothing attached");
@@ -3842,7 +3864,11 @@ mod tests {
         app.unknown_initial = false;
 
         // Narrowing needs a first scan to narrow...
-        assert!(app.scan_blocker(false).is_some(), "nothing scanned yet");
+        assert_eq!(
+            app.scan_blocker(false),
+            Some("Search first, then narrow down."),
+            "nothing searched yet"
+        );
         app.scanner
             .as_mut()
             .unwrap()

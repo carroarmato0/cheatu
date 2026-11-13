@@ -39,7 +39,6 @@ impl Feedback {
     }
 
     /// A confirmation below `at`, gone after [`OK_TTL`].
-    #[allow(dead_code)] // first callers: the scanner and My cheats
     pub fn ok(&mut self, at: egui::Rect, text: impl Into<String>, now: Instant) {
         self.push(at, text.into(), false, now);
     }
