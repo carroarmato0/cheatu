@@ -5,6 +5,7 @@ members = [
     "crates/cheatu-cli",
     "crates/cheatu-gui",
     "crates/cheatu-inject",
+    "crates/cheatu-testbed",
 ]
 
 [workspace.package]
