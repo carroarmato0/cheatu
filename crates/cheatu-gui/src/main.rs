@@ -9,6 +9,7 @@
 mod cheat_table;
 mod feedback;
 mod file_dialog;
+mod my_cheats;
 mod pointer_window;
 mod rpg_detect;
 mod screen;
@@ -39,7 +40,7 @@ use cheatu_core::{
     list_processes, privilege, probe_address, read_maps, region_for, Mem, ProbeOutcome, ScanType,
     ScanValue,
 };
-use cheatu_core::{AddrExpr, LiveSource, MemSource};
+use cheatu_core::{LiveSource, MemSource};
 use cheatu_inject::{agent, detect_dir, find_rpgmaker_games, scan_dir, Engine, FoundGame};
 
 use cheat_table::GuiEntry;
@@ -1351,6 +1352,10 @@ struct CheatuApp {
     /// The game the guided steps' wizard was started for (or followed to
     /// after a restart); attaching to any other game restarts it.
     /// Confirmations and errors next to the control that caused them.
+    /// Which My cheats rows are unfolded or being renamed.
+    cheats_ui: my_cheats::PanelState,
+    /// My cheats as last saved or opened, for the unsaved marker.
+    saved_mark: my_cheats::Saved,
     feedback: Feedback,
     wizard_for: Option<i32>,
     wizard: Option<WizardWindow>,
@@ -2145,6 +2150,7 @@ impl CheatuApp {
                 self.status = format!("Saved {} entries to {}.", t.entries.len(), path.display());
                 self.table_process = process;
                 self.table_path = Some(path);
+                self.saved_mark.mark(&self.saved);
             }
             Err(e) => self.status = format!("Could not save {}: {e}", path.display()),
         }
@@ -2205,6 +2211,7 @@ impl CheatuApp {
         let n = t.entries.len();
         self.saved = t.entries;
         self.table_path = Some(path.clone());
+        self.saved_mark.mark(&self.saved);
         self.table_process = t.process.clone();
         self.attach_offer = None;
         let mut status = format!(
@@ -2306,7 +2313,7 @@ impl eframe::App for CheatuApp {
         let mut expr_edited = false;
         let mut quick_save = false;
         // Index of the cheat table row whose value should be written once.
-        let mut do_set: Option<usize> = None;
+        let mut do_set: Option<(usize, egui::Rect)> = None;
         // Row to make an AoB signature for / to pointer scan.
         let mut do_signature: Option<usize> = None;
         let mut do_ptr_scan: Option<usize> = None;
@@ -2458,287 +2465,62 @@ impl eframe::App for CheatuApp {
             });
         });
 
-        // ---- Cheat table (right, scanner mode only) --------------------
-        // Bound outside the panel so the rows can read live values while
-        // `self.saved` is borrowed mutably.
-        let scanner_ref = self.scanner.as_ref();
+        // ---- My cheats (right) ------------------------------------------
+        let mut cheat_actions = Vec::new();
         if matches!(screen, Screen::Guided | Screen::Scanner) {
             let max_width =
                 (ctx.screen_rect().width() - RESULTS_MIN_WIDTH).max(CHEAT_TABLE_MIN_WIDTH);
+            let dirty = self.saved_mark.is_dirty(&self.saved);
+            let cx = my_cheats::Ctx {
+                advanced: self.advanced,
+                attached: self.attached.is_some(),
+                can_read: self.attached.is_some() && self.live.is_some(),
+                aob_busy: self.aob_pending.is_some(),
+                sig_busy: self.sig_pending.is_some(),
+                live_error: self.live_error.as_deref(),
+                scanner: self.scanner.as_ref(),
+                path: self.table_path.as_deref(),
+                dirty,
+            };
+            // Narrow while empty, so the main area gets the room.
+            let default_width = if self.saved.is_empty() { 300.0 } else { 460.0 };
             egui::SidePanel::right("cheat_table")
                 .resizable(true)
-                .default_width(460.0)
+                .default_width(default_width)
                 .width_range(CHEAT_TABLE_MIN_WIDTH..=max_width)
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.heading("Cheat table");
-                        if ui
-                            .small_button("📂 Open…")
-                            .on_hover_text("Open a cheat table file (all freezes start off)")
-                            .clicked()
-                        {
-                            open_dialog = Some(DialogPurpose::OpenTable);
-                        }
-                        let save_hint = match &self.table_path {
-                            Some(p) => format!("Save to {}", p.display()),
-                            None => "Save to a new file".to_string(),
-                        };
-                        if ui
-                            .add_enabled(
-                                !self.saved.is_empty(),
-                                egui::Button::new("💾 Save").small(),
-                            )
-                            .on_hover_text(save_hint)
-                            .clicked()
-                        {
-                            quick_save = true;
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.saved.is_empty(),
-                                egui::Button::new("Save as…").small(),
-                            )
-                            .on_hover_text("Save to a file of your choice")
-                            .clicked()
-                        {
-                            open_dialog = Some(DialogPurpose::SaveTable);
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.saved.is_empty(),
-                                egui::Button::new("🗑 Clear all").small(),
-                            )
-                            .on_hover_text("Remove every row (unfreezes them too)")
-                            .clicked()
-                        {
-                            clear_table = true;
-                        }
-                    });
-                    if let Some(p) = &self.table_path {
-                        ui.label(
-                            egui::RichText::new(p.display().to_string())
-                                .monospace()
-                                .weak()
-                                .small(),
-                        );
-                    }
-                    ui.label(
-                        egui::RichText::new(
-                            "Tick ❄ to freeze; edit Value to set it. The address is an \
-                             expression, e.g. [\"game.exe\"+0x1a2b30]+0x48.",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                    ui.separator();
-
-                    if self.saved.is_empty() {
-                        ui.label(egui::RichText::new("No saved addresses yet.").weak());
-                        ui.label(
-                            egui::RichText::new(
-                                "Use the “+” button on a scan result, or Open a table.",
-                            )
-                            .weak()
-                            .small(),
-                        );
-                    }
-
-                    let attached = self.attached.is_some();
-                    let aob_busy = self.aob_pending.is_some();
-                    let sig_busy = self.sig_pending.is_some();
-                    let can_read = attached && self.live.is_some();
-                    let live_error = self.live_error.as_deref();
-                    egui::ScrollArea::both()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for (i, entry) in self.saved.iter_mut().enumerate() {
-                                // Two lines per entry:
-                                //   [❄] description  ty  [value] [Set] [⟳] [🗑]
-                                //   [expression]  → 0xRESOLVED = current
-                                // The live value goes last because it changes
-                                // constantly: anything after it would jump
-                                // around as its width changed.
-                                if i > 0 {
-                                    ui.separator();
-                                }
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut entry.entry.frozen, "")
-                                        .on_hover_text("Freeze");
-                                    if entry.frozen_when_saved && !entry.entry.frozen {
-                                        ui.label(
-                                            egui::RichText::new("frozen when saved").weak().small(),
-                                        )
-                                        .on_hover_text(
-                                            "This entry was frozen when the table was saved. \
-                                             Freezes are off after opening a table; tick ❄ to \
-                                             freeze it again.",
-                                        );
-                                    }
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut entry.entry.description)
-                                            .hint_text("description")
-                                            .desired_width(96.0),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(entry.entry.ty.friendly_label())
-                                            .weak()
-                                            .small(),
-                                    );
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut entry.entry.value)
-                                            .desired_width(64.0),
-                                    );
-                                    let valid = entry.entry.ty.parse(&entry.entry.value).is_some();
-                                    let resolved = entry.resolved.is_ok();
-                                    if ui
-                                        .add_enabled(
-                                            valid && resolved && !entry.entry.frozen,
-                                            egui::Button::new("Set").small(),
-                                        )
-                                        .on_hover_text("Write this value to the address once")
-                                        .on_disabled_hover_text(if entry.entry.frozen {
-                                            "Frozen — this value is already written continuously."
-                                        } else if !resolved {
-                                            "The address does not resolve."
-                                        } else {
-                                            "Not a valid value for this type."
-                                        })
-                                        .clicked()
-                                    {
-                                        do_set = Some(i);
-                                    }
-                                    let busy = entry.uses_aob() && aob_busy;
-                                    if ui
-                                        .add_enabled(
-                                            attached && !busy,
-                                            egui::Button::new("⟳").small(),
-                                        )
-                                        .on_hover_text("Re-resolve the address expression now")
-                                        .on_disabled_hover_text(if busy {
-                                            "An aob() search is already running."
-                                        } else {
-                                            "Attach to a process first."
-                                        })
-                                        .clicked()
-                                    {
-                                        entry.needs_resolve = true;
-                                    }
-                                    if ui.small_button("🗑").on_hover_text("remove").clicked() {
-                                        remove_from_table.push(i);
-                                    }
-                                    let usable = can_read && resolved;
-                                    ui.menu_button("…", |ui| {
-                                        if ui
-                                            .add_enabled(
-                                                usable && !sig_busy,
-                                                egui::Button::new("Make AoB signature"),
-                                            )
-                                            .on_hover_text(
-                                                "Replace the address with a byte pattern \
-                                                 search that survives restarts",
-                                            )
-                                            .on_disabled_hover_text(if sig_busy {
-                                                "A signature is already being made."
-                                            } else {
-                                                "Attach, and let the address resolve first."
-                                            })
-                                            .clicked()
-                                        {
-                                            do_signature = Some(i);
-                                            ui.close_menu();
-                                        }
-                                        if ui
-                                            .add_enabled(usable, egui::Button::new("Pointer scan…"))
-                                            .on_hover_text(
-                                                "Find pointer chains from static data to \
-                                                 this address",
-                                            )
-                                            .on_disabled_hover_text(
-                                                "Attach, and let the address resolve first.",
-                                            )
-                                            .clicked()
-                                        {
-                                            do_ptr_scan = Some(i);
-                                            ui.close_menu();
-                                        }
-                                    })
-                                    .response
-                                    .on_hover_text("More: AoB signature, pointer scan");
-                                });
-                                ui.horizontal(|ui| {
-                                    let resp = ui.add(
-                                        egui::TextEdit::singleline(&mut entry.expr_text)
-                                            .font(egui::TextStyle::Monospace)
-                                            .hint_text("address expression")
-                                            .desired_width(
-                                                (ui.available_width() - 150.0).clamp(160.0, 420.0),
-                                            ),
-                                    );
-                                    if resp.changed() {
-                                        entry.parse_error = AddrExpr::parse(&entry.expr_text)
-                                            .err()
-                                            .map(|e| e.to_string());
-                                    }
-                                    // Applied when editing ends, not per keystroke:
-                                    // a half-typed address must never be written to.
-                                    if resp.lost_focus() {
-                                        if let Ok(expr) = AddrExpr::parse(&entry.expr_text) {
-                                            if expr != entry.entry.address {
-                                                entry.entry.address = expr;
-                                                entry.resolved = Err("not resolved yet".into());
-                                                entry.needs_resolve = true;
-                                                expr_edited = true;
-                                            }
-                                        }
-                                    }
-                                    if !attached {
-                                        ui.label(
-                                            egui::RichText::new("not attached").weak().small(),
-                                        );
-                                    } else if let Some(why) = live_error {
-                                        ui.label(
-                                            egui::RichText::new(why).small().color(err_color(ui)),
-                                        );
-                                    } else {
-                                        match &entry.resolved {
-                                            Ok(addr) => {
-                                                ui.monospace(format!("→ 0x{addr:012x}"));
-                                                let cur = scanner_ref
-                                                    .and_then(|s| {
-                                                        read_current(s, *addr, entry.entry.ty)
-                                                    })
-                                                    .unwrap_or_else(|| "n/a".to_string());
-                                                ui.label(
-                                                    egui::RichText::new(format!("= {cur}"))
-                                                        .monospace()
-                                                        .weak(),
-                                                )
-                                                .on_hover_text("The value in the game right now");
-                                            }
-                                            Err(e) => {
-                                                let text = if entry.uses_aob()
-                                                    && aob_busy
-                                                    && e == "not resolved yet"
-                                                {
-                                                    "searching…".to_string()
-                                                } else {
-                                                    e.clone()
-                                                };
-                                                ui.label(
-                                                    egui::RichText::new(text)
-                                                        .small()
-                                                        .color(err_color(ui)),
-                                                );
-                                            }
-                                        }
-                                    }
-                                });
-                                if let Some(e) = &entry.parse_error {
-                                    ui.label(egui::RichText::new(e).small().color(err_color(ui)));
-                                }
-                            }
-                        });
+                    cheat_actions = my_cheats::panel(ui, &mut self.cheats_ui, &mut self.saved, &cx);
                 });
+        }
+        for action in cheat_actions {
+            use my_cheats::Action;
+            match action {
+                Action::Open => open_dialog = Some(DialogPurpose::OpenTable),
+                Action::Save => quick_save = true,
+                Action::SaveAs => open_dialog = Some(DialogPurpose::SaveTable),
+                Action::ClearAll => clear_table = true,
+                Action::Set(i, at) => do_set = Some((i, at)),
+                Action::Remove(i) => remove_from_table.push(i),
+                Action::PointerScan(i) => do_ptr_scan = Some(i),
+                Action::Signature(i) => do_signature = Some(i),
+                Action::MakeLasting(i) => {
+                    let addr = self.saved.get(i).and_then(|e| e.resolved.clone().ok());
+                    let regions = self.live.as_ref().map(|l| l.regions());
+                    if let (Some(addr), Some(regions)) = (addr, regions) {
+                        match my_cheats::make_lasting_tool(regions, addr) {
+                            my_cheats::MakeLasting::Signature => do_signature = Some(i),
+                            my_cheats::MakeLasting::PointerScan => do_ptr_scan = Some(i),
+                        }
+                    }
+                }
+                Action::ChangeType(i, ty) => {
+                    if let Some(e) = self.saved.get_mut(i) {
+                        e.entry.ty = ty;
+                        e.needs_resolve = true;
+                    }
+                }
+                Action::ExprEdited => expr_edited = true,
+            }
         }
 
         // ---- Central panel: scanner controls, or RPG Maker mode --------
@@ -3606,17 +3388,29 @@ impl eframe::App for CheatuApp {
         // A one-shot write. Freezing writes continuously; this is for the far
         // more common "set it once and see what happens".
         // Only ever to a resolved address.
-        if let Some(entry) = do_set.and_then(|i| self.saved.get(i)) {
+        if let Some((entry, at)) = do_set.and_then(|(i, at)| Some((self.saved.get(i)?, at))) {
             let value = entry.entry.ty.parse(&entry.entry.value);
-            self.status = match (&self.scanner, &entry.resolved, value) {
-                (None, _, _) => "Attach to a process first.".into(),
-                (_, Err(e), _) => format!("Not written: the address does not resolve ({e})."),
-                (_, _, None) => "Not a valid value for this type.".into(),
+            let name = &entry.entry.description;
+            let result = match (&self.scanner, &entry.resolved, value) {
+                (None, _, _) => Err("Attach to the game first.".to_string()),
+                (_, Err(e), _) => Err(format!("Not written: not found in the game ({e}).")),
+                (_, _, None) => Err("Not a valid value for this kind of number.".into()),
                 (Some(scanner), Ok(addr), Some(v)) => match scanner.write_value(*addr, &v) {
-                    Ok(()) => format!("Wrote {v} to 0x{addr:x}."),
-                    Err(e) => format!("Write to 0x{addr:x} failed: {e}"),
+                    Ok(()) => Ok(format!("✔ Wrote {v} to {name}")),
+                    Err(e) => Err(format!("Writing {name} failed: {e}")),
                 },
             };
+            let now = Instant::now();
+            match result {
+                Ok(msg) => {
+                    self.feedback.ok(at, msg.clone(), now);
+                    self.status = msg;
+                }
+                Err(msg) => {
+                    self.feedback.error(at, msg.clone(), now);
+                    self.status = msg;
+                }
+            }
         }
         if let Some(i) = do_signature {
             self.start_signature(i);
@@ -3820,7 +3614,7 @@ mod tests {
         let mut frozen = GuiEntry::new(
             cheatu_core::table::TableEntry {
                 description: String::new(),
-                address: AddrExpr::parse("0x1000").unwrap(),
+                address: cheatu_core::AddrExpr::parse("0x1000").unwrap(),
                 ty: ScanType::I32,
                 value: "1".into(),
                 frozen: true,

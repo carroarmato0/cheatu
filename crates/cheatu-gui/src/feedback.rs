@@ -44,7 +44,6 @@ impl Feedback {
     }
 
     /// An error below `at`, shown until dismissed.
-    #[allow(dead_code)] // first callers: the scanner and My cheats
     pub fn error(&mut self, at: egui::Rect, text: impl Into<String>, now: Instant) {
         self.push(at, text.into(), true, now);
     }
