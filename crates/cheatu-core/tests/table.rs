@@ -242,7 +242,9 @@ fn save_does_not_follow_planted_temp_symlink() {
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
     let meta = fs::symlink_metadata(&p).unwrap();
     assert!(meta.file_type().is_file(), "saved over a regular file");
-    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    // A new file: readable by others (see file_io's mode tests), never
+    // writable by them.
+    assert_eq!(meta.permissions().mode() & 0o022, 0);
     assert_eq!(load(&p).unwrap(), table);
     let _ = fs::remove_dir_all(&dir);
 }

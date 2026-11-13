@@ -160,9 +160,11 @@ someone else.
   number in the status bar; the current table is left untouched. A file with a
   newer `version` is reported as such, even when it has keys this version does
   not know.
-- Saving writes a new temporary file (readable only by you, mode 0600) next to
-  the table and renames it over the table, so a failed save never damages an
-  existing table. A row whose address could not be read back (a built
+- Saving writes a new temporary file next to the table and renames it over
+  the table, so a failed save never damages an existing table. An existing
+  table keeps its permissions (and, when cheatu runs as root, its owner); a new
+  one gets mode 0644 minus your umask, so you can still open a table you saved
+  from an elevated cheatu. A row whose address could not be read back (a built
   expression over the limits below, or a module name containing `"`) is
   refused with its number and description, and nothing is written.
 
