@@ -141,6 +141,9 @@ fn main() -> eframe::Result<()> {
             install_fonts(&cc.egui_ctx);
             configure_style(&cc.egui_ctx);
             let theme = load_theme();
+            // Repair a config directory an older elevated cheatu left owned
+            // by root (best-effort; see `give_config_to_home_owner`).
+            let _ = give_config_to_home_owner(&config_path(), &home_dir());
             let ctx = cc.egui_ctx.clone();
             let system_theme =
                 SystemTheme::start(theme == ThemePref::System, move || ctx.request_repaint());
@@ -295,23 +298,60 @@ fn config_path() -> PathBuf {
 }
 
 fn load_theme() -> ThemePref {
-    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
+    load_theme_from(&config_path())
+}
+
+fn load_theme_from(path: &Path) -> ThemePref {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     let theme = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| v.get("theme")?.as_str().map(str::to_owned));
     ThemePref::from_name(theme.as_deref())
 }
 
-/// Best-effort: a lost theme preference is not worth an error dialog.
-fn save_theme(theme: ThemePref) {
-    let path = config_path();
+fn save_theme(theme: ThemePref) -> std::io::Result<()> {
+    save_theme_to(&config_path(), &home_dir(), theme)
+}
+
+fn save_theme_to(path: &Path, home: &Path, theme: ThemePref) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
-    let _ = std::fs::write(
+    std::fs::write(
         path,
         serde_json::json!({ "theme": theme.name() }).to_string(),
-    );
+    )?;
+    give_config_to_home_owner(path, home)
+}
+
+/// Elevated, cheatu keeps the user's HOME, so it writes the user's config: as
+/// root, hand the config directory and file to the owner of `home`, or the
+/// user's own cheatu can no longer save there. Also repairs a directory an
+/// earlier root instance left behind. Does nothing unless running as root.
+fn give_config_to_home_owner(path: &Path, home: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let owner = std::fs::metadata(home)?;
+    if owner.uid() == 0 {
+        return Ok(());
+    }
+    // `path` and its parents below `home`. Never through a symlink, and only
+    // what root owns: nothing outside the user's files changes hands.
+    for p in path
+        .ancestors()
+        .take_while(|p| *p != home && p.starts_with(home))
+    {
+        let Ok(m) = std::fs::symlink_metadata(p) else {
+            continue;
+        };
+        if m.uid() == 0 && (m.is_dir() || m.is_file()) {
+            std::os::unix::fs::lchown(p, Some(owner.uid()), Some(owner.gid()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Find a CJK font: an explicit override, then fontconfig, then known paths.
@@ -3423,7 +3463,9 @@ impl eframe::App for CheatuApp {
             if let Some(st) = &self.system_theme {
                 st.set_following(theme == ThemePref::System);
             }
-            save_theme(theme);
+            if let Err(e) = save_theme(theme) {
+                self.status = format!("Could not save the theme setting: {e}.");
+            }
         }
 
         // A search started before the edit must not land on the new
@@ -3742,6 +3784,58 @@ fn read_current(scanner: &Scanner, addr: u64, ty: ScanType) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_scratch(name: &str) -> (PathBuf, PathBuf) {
+        let home = std::env::temp_dir().join(format!("cheatu-gui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("cfg").join("cheatu").join("config.json");
+        (home, path)
+    }
+
+    #[test]
+    fn theme_setting_round_trips() {
+        let (home, path) = config_scratch("roundtrip");
+        assert_eq!(load_theme_from(&path), ThemePref::System);
+        for t in [ThemePref::Light, ThemePref::Dark, ThemePref::System] {
+            save_theme_to(&path, &home, t).unwrap();
+            assert_eq!(load_theme_from(&path), t);
+        }
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn unwritable_config_reports_an_error() {
+        let (home, path) = config_scratch("unwritable");
+        // A file where the directory should be.
+        std::fs::create_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
+        std::fs::write(path.parent().unwrap(), b"").unwrap();
+        assert!(save_theme_to(&path, &home, ThemePref::Light).is_err());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Root saving into a user's HOME must leave the config theirs, and
+    /// repair a directory an earlier root instance took. Root only (the
+    /// Linux test container).
+    #[test]
+    fn root_save_gives_config_to_home_owner() {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let (home, path) = config_scratch("owner");
+        std::os::unix::fs::chown(&home, Some(1000), Some(1000)).unwrap();
+        // Left behind by an earlier root instance.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        save_theme_to(&path, &home, ThemePref::Light).unwrap();
+        for p in [path.parent().unwrap(), path.as_path()] {
+            let m = std::fs::metadata(p).unwrap();
+            assert_eq!((m.uid(), m.gid()), (1000, 1000), "{}", p.display());
+        }
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
