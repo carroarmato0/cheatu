@@ -67,7 +67,7 @@ Start the testbed in one terminal and cheatu-gui next to it, and attach to
 
 ### 1. Find the gold, and the decoy
 
-1. Scan for `100` as 4-byte.
+1. Scan for `100` as **4 Bytes**.
 2. `fight` in the testbed (gold becomes 115), then a next scan for `115`.
 3. A couple of rounds of `buy`/`fight` leave **two** results. `addrs` shows
    they are `gold` and `gold_shown`.
@@ -92,9 +92,10 @@ the new process.
 
 ### 4. Pointer-scan HP
 
-1. With HP in the table, open its row menu (hover text "More: AoB signature, pointer scan") and choose **Pointer scan…**, then **Run the pointer scan**.
+1. With HP in the table, open its row menu (hover text "More: AoB signature, pointer scan") and choose **Pointer scan…**, then **Scan**.
 2. Quit and restart the testbed, attach, and filter the chains by HP's new
-   address (from `addrs`, or found with a quick scan). One or more chains
+   address with **Filter with new address** (from `addrs`, or found with a
+   quick scan). One or more chains
    survive.
 3. Type `next`: the surviving chains should still point at HP. Add one to
    the table and freeze it; it now holds across levels and restarts.
