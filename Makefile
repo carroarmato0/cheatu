@@ -1,6 +1,7 @@
 # cheatu — developer and packaging targets.
 #
 # Development:   make build | test | lint | run-gui | run-cli
+#                make testbed                 (target game for trying cheatu)
 # Install:       sudo make install            (PREFIX=/usr/local by default)
 # Packaging:     make packages                (deb + rpm + AppImage, in a container)
 #                make deb | rpm | appimage    (one format, in a container)
@@ -67,6 +68,16 @@ run-gui: ## Build and run the GUI
 .PHONY: run-cli
 run-cli: ## Build and run the CLI
 	cargo run --release -p cheatu-cli
+
+.PHONY: testbed
+testbed: ## Build and run cheatu-testbed, a target game for trying cheatu
+	cargo build --release -p cheatu-testbed
+	@# get-task-allow lets cheatu attach without root on macOS.
+	@if [ "$$(uname)" = Darwin ]; then \
+		codesign --force --sign - --entitlements crates/cheatu-testbed/entitlements.plist \
+			target/release/cheatu-testbed; \
+	fi
+	target/release/cheatu-testbed
 
 .PHONY: clean
 clean: ## Remove build artifacts and packaged output
