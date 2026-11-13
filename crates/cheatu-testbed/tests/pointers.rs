@@ -41,16 +41,9 @@ fn scan_then_restart() -> Option<(Testbed, cheatu_core::LiveSource, PtrResults)>
     Some((tb2, src2, results))
 }
 
-// Known cheatu bug, found by this test: the pointer search follows each
-// location once, so when `Player` sits within `max_offset` of `Level` (macOS
-// malloc does this) it keeps the short `[[WORLD]+0]+0xd0` chain — valid only
-// while the two stay adjacent — and prunes the real `[[[WORLD]+0]+8]+0x10`.
-// After `next` no chain survives. Passes on Linux by layout luck.
+// On macOS `Player` sits right after `Level`, so a short chain through
+// `Level` itself also reaches `hp`, but only the full chain survives `next`.
 #[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "pointer search prunes the robust chain (location dedup); see comment"
-)]
 fn chain_to_hp_survives_restart_and_next() {
     let Some((mut tb, mut src, mut results)) = scan_then_restart() else {
         return;

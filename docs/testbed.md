@@ -97,15 +97,8 @@ the new process.
    address with **Filter with new address** (from `addrs`, or found with a
    quick scan). One or more chains
    survive.
-3. Type `next`: the surviving chains should still point at HP. Add one to
+3. Type `next`: the surviving chains still point at HP. Add one to
    the table and freeze it; it now holds across levels and restarts.
-
-> **Known issue (macOS):** macOS's allocator puts `Player` right after
-> `Level`, and the pointer scan currently keeps only the short chain
-> `[["cheatu-testbed"+0x…]+0x0]+0xd0` (valid only while the two stay
-> adjacent) instead of the real `[[["cheatu-testbed"+0x…]+0x0]+0x8]+0x10`.
-> On macOS no chain survives `next` until the scanner is fixed. The test
-> `chain_to_hp_survives_restart_and_next` pins this.
 
 ### 5. Signatures
 

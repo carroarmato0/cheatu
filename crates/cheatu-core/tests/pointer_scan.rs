@@ -603,3 +603,42 @@ fn chains_through_unnameable_modules_are_skipped() {
     let found = search(&src, T, &PtrScanSettings::default());
     assert!(found.chains.is_empty(), "{:?}", found.chains);
 }
+
+/// The testbed's macOS layout: a static `WORLD` points to `World`, whose
+/// first field points to `Level`; `Level+8` points to `Player`, which the
+/// allocator put right after `Level` (+0xc0). The target is `Player+0x10`.
+///
+/// `World+0` is reachable two ways: one step from the target (`Level` is
+/// within `max_offset` of it, +0xd0) and two steps (via `Level+8`, +0x8).
+/// Both chains must be found; only the longer one survives the objects
+/// moving apart.
+#[test]
+fn location_reached_twice_keeps_both_routes() {
+    const WORLD_OBJ: u64 = HEAP + 0x100;
+    const LEVEL: u64 = HEAP + 0x2000;
+    const PLAYER: u64 = LEVEL + 0xc0;
+    let regions = vec![
+        rw(0x20000, 0x1000, "/usr/lib/libgame.dylib"),
+        rw(HEAP, 0x4000, ""),
+    ];
+    let data = regions
+        .iter()
+        .map(|r| (r.start, vec![0u8; r.size() as usize]))
+        .collect();
+    let mut src = Fake { regions, data };
+    src.put(0x20040, WORLD_OBJ);
+    src.put(WORLD_OBJ, LEVEL);
+    src.put(LEVEL + 8, PLAYER);
+
+    let found = search(&src, PLAYER + 0x10, &PtrScanSettings::default());
+    let short = PointerChain {
+        module: "libgame.dylib".into(),
+        base_offset: 0x40,
+        offsets: vec![0x0, 0xd0],
+    };
+    let long = PointerChain {
+        offsets: vec![0x0, 0x8, 0x10],
+        ..short.clone()
+    };
+    assert_eq!(found.chains, vec![short, long]);
+}
