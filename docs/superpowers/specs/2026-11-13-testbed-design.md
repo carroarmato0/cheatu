@@ -167,3 +167,26 @@ extension); tests take the module name from the spawned path's file name.
   commands, so samples are stable.
 - If Task 1 shows macOS needs root, macOS tests only run under
   `sudo -E cargo test -p cheatu-testbed`; Linux remains the authoritative run.
+
+## Measurements
+
+13/11/2026, macOS (Darwin 27.2, Apple Silicon), uid 501, no sudo. A throwaway
+probe spawned a small Rust child and called `LiveSource::open(child_pid)`.
+
+| Case | Result |
+|---|---|
+| macOS, child ad-hoc signed by the linker (no entitlements) | `PermissionDenied`: "permission denied for process …: run cheatu as root (elevate) to scan it" |
+| macOS, child re-signed `codesign --force --sign - --entitlements` with `com.apple.security.get-task-allow` | `OK` (191 regions), as a normal user |
+| Linux, podman `rust:1`, default (root in container) | `OK` (24 regions) |
+| Linux, podman `rust:1`, `--user 1000:1000`, no extra caps (`ptrace_scope` = 0 there) | `OK` (24 regions) |
+
+Rulings:
+
+- The test harness signs the testbed with
+  `crates/cheatu-testbed/entitlements.plist` (get-task-allow) once per test
+  process before the first spawn, so macOS tests run without sudo.
+  `make testbed` signs it the same way, so a non-root cheatu-gui can attach
+  to it for manual play.
+- No extra container flags are needed. Hosts with Yama `ptrace_scope=1` still
+  allow it (the test is the child's parent); `ptrace_scope` ≥ 2 does not, and
+  tests then skip unless `CHEATU_TESTBED_REQUIRE=1`.
