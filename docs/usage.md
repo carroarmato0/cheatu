@@ -70,9 +70,9 @@ cheatu> list          # the Type column shows what each address really is
 
 The header shows **cheatu** and, once a game is attached, the game's name with a
 **⏷** menu (**Change game…**, **Detach**, and for RPG Maker games the
-**RPG Maker mode** / **Memory scanner** choice). On the right: **✨ Guided…**
-(only with Advanced on), the **Advanced** checkbox (remembered between runs),
-**⚙ Settings** and **ℹ About**.
+**RPG Maker mode** / **Memory scanner** choice). On the right: the
+**Advanced** checkbox (remembered between runs), **⚙ Settings** and
+**ℹ About**.
 
 ### Choosing a game
 
@@ -182,7 +182,7 @@ Tick **Advanced** for the memory scanner and the full cheat table.
    **🧬 AoB signature**, **⟳ Re-resolve** and **🗑**.
 
 Not sure which address is the real one, or want the cheat to keep working after
-the game restarts? **✨ Guided…** in the header opens the
+the game restarts? Untick **Advanced** in the header for the
 [guided steps](#guided-steps), which do all of the above step by step.
 
 **⚙ Settings → Theme** picks **System** (the default), **Dark** or **Light**.
@@ -353,7 +353,7 @@ decimal); only the older `write` command still reads bare digits as hex.
 ## Guided steps
 
 With **Advanced** off, attaching to a game opens guided steps in the main area,
-under the step bar (with Advanced on, **✨ Guided…** in the header opens them).
+under the step bar (untick **Advanced** to get back to them).
 They walk you through the whole flow without needing to know how memory
 scanners work. They use their own scan, so the Advanced results are left
 alone. Every long step shows what it is doing, with **Cancel** where it can

@@ -15,6 +15,8 @@ const BANNED: &[&str] = &[
     "New cheat",
     "Elevate & attach",
     "Cheat table cleared",
+    // Unticking Advanced is the way back to the guided steps.
+    "Guided…",
 ];
 
 /// Words banned as whole words (the spec's vocabulary: cheats, not entries).

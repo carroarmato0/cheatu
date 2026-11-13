@@ -2533,18 +2533,11 @@ impl eframe::App for CheatuApp {
                     ui.separator();
                     if ui
                         .checkbox(&mut self.advanced, "Advanced")
-                        .on_hover_text("Show the full scanner and every tool")
+                        .on_hover_text(
+                            "Show the full scanner and every tool; untick for the guided steps",
+                        )
                         .changed()
                     {
-                        advanced_changed = true;
-                    }
-                    if self.advanced
-                        && ui
-                            .button("✨ Guided…")
-                            .on_hover_text("Find a value step by step")
-                            .clicked()
-                    {
-                        self.advanced = false;
                         advanced_changed = true;
                     }
                 });
