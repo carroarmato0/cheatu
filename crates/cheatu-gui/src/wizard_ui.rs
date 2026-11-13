@@ -462,11 +462,15 @@ pub enum WizardEvent {
     Save(TableEntry),
     /// The wizard attached to the restarted game; the app should follow.
     Reattached(i32),
+    /// Leave the guided steps for the full scanner, with an unknown-value
+    /// search ready when `unknown`.
+    ScanManually { unknown: bool },
 }
 
-/// The "New cheat" window.
+/// The guided steps, drawn in the main area.
 pub struct WizardWindow {
-    open: bool,
+    /// The name of the cheat just added, while "Find another value" shows.
+    saved: Option<String>,
     inner: Arc<Mutex<Inner>>,
     activity: Arc<Activity>,
     view: View,
@@ -504,7 +508,7 @@ impl WizardWindow {
         };
         let view = view_of(&mut inner);
         Ok(WizardWindow {
-            open: true,
+            saved: None,
             inner: Arc::new(Mutex::new(inner)),
             activity,
             view,
@@ -520,8 +524,13 @@ impl WizardWindow {
         })
     }
 
-    pub fn is_open(&self) -> bool {
-        self.open
+    /// Where the guided steps are on the step bar.
+    pub fn step(&self) -> u8 {
+        if self.saved.is_some() {
+            3
+        } else {
+            guided_step(&self.view.step)
+        }
     }
 
     /// Mirrors "pause target while scanning". Set every frame.
@@ -610,8 +619,8 @@ impl WizardWindow {
         }
     }
 
-    /// Draw the window and return what the app must do.
-    pub fn show(&mut self, ctx: &egui::Context) -> Vec<WizardEvent> {
+    /// Draw the current step in `ui` and return what the app must do.
+    pub fn show_in(&mut self, ui: &mut egui::Ui) -> Vec<WizardEvent> {
         let mut events = Vec::new();
         self.poll(&mut events);
 
@@ -631,35 +640,36 @@ impl WizardWindow {
 
         let mut input = None;
         let mut save = false;
-        let mut open = self.open;
-        egui::Window::new("New cheat")
-            .open(&mut open)
-            .default_width(460.0)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                if self.job.as_ref().is_some_and(|j| !j.quiet) {
-                    self.working_ui(ui);
-                    return;
+        if let Some(name) = self.saved.clone() {
+            ui.heading(format!("✔ Added {name} to My cheats"));
+            ui.label("Freeze or change it on the right. Want another cheat?");
+            ui.add_space(6.0);
+            if ui.button("Find another value").clicked() {
+                self.saved = None;
+                self.name.clear();
+                input = Some(Input::StartOver);
+            }
+        } else if self.job.as_ref().is_some_and(|j| !j.quiet) {
+            self.working_ui(ui);
+        } else {
+            self.step_ui(ui, &mut input, &mut save, &mut events);
+            if let Some(e) = &self.view.error {
+                ui.label(
+                    egui::RichText::new(e)
+                        .small()
+                        .color(ui.visuals().error_fg_color),
+                );
+            }
+            if self.view.step != Step::AskValue {
+                ui.separator();
+                if ui
+                    .add_enabled(self.job.is_none(), egui::Button::new("Start over"))
+                    .clicked()
+                {
+                    input = Some(Input::StartOver);
                 }
-                self.step_ui(ui, &mut input, &mut save);
-                if let Some(e) = &self.view.error {
-                    ui.label(
-                        egui::RichText::new(e)
-                            .small()
-                            .color(ui.visuals().error_fg_color),
-                    );
-                }
-                if self.view.step != Step::AskValue {
-                    ui.separator();
-                    if ui
-                        .add_enabled(self.job.is_none(), egui::Button::new("Start over"))
-                        .clicked()
-                    {
-                        input = Some(Input::StartOver);
-                    }
-                }
-            });
-        self.open = open;
+            }
+        }
 
         if save {
             if let Step::Save { expr } = &self.view.step {
@@ -674,7 +684,7 @@ impl WizardWindow {
                     value: self.save_value.trim().to_string(),
                     frozen: self.freeze,
                 }));
-                self.open = false;
+                self.saved = Some(self.name.trim().to_string());
             }
         }
         if let Some(i) = input {
@@ -810,22 +820,25 @@ impl WizardWindow {
         }
     }
 
-    fn step_ui(&mut self, ui: &mut egui::Ui, input: &mut Option<Input>, save: &mut bool) {
+    fn step_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        input: &mut Option<Input>,
+        save: &mut bool,
+        events: &mut Vec<WizardEvent>,
+    ) {
         let step = self.view.step.clone();
         match step {
             Step::AskValue => {
-                ui.heading("1. Find the value");
-                ui.label(
-                    "What value do you want to change, and what is it now? Enter the \
-                     number exactly as the game shows it.",
-                );
+                ui.heading("What value do you want to change?");
+                ui.label("Type the number exactly as the game shows it, e.g. your rupees.");
                 ui.horizontal(|ui| {
                     ui.label("Kind of number:");
                     egui::ComboBox::from_id_salt("wizard_type")
-                        .selected_text(type_label(self.ty))
+                        .selected_text(kind_label(self.ty))
                         .show_ui(ui, |ui| {
-                            for t in ScanType::ALL {
-                                ui.selectable_value(&mut self.ty, t, type_label(t));
+                            for t in GUIDED_KINDS {
+                                ui.selectable_value(&mut self.ty, t, kind_label(t));
                             }
                         });
                 });
@@ -840,25 +853,40 @@ impl WizardWindow {
                     .small()
                     .weak(),
                 );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Not a number on screen (a bar, a gauge)?").weak(),
+                    );
+                    if ui.link("Search for an unknown value").clicked() {
+                        events.push(WizardEvent::ScanManually { unknown: true });
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Already know how this works?").weak());
+                    if ui.link("Scan manually").clicked() {
+                        events.push(WizardEvent::ScanManually { unknown: false });
+                    }
+                });
             }
             Step::Narrowing { count } => {
-                ui.heading("1. Find the value");
+                ui.heading("Narrow it down");
                 ui.label(format!(
-                    "{count} addresses hold that value. Change it in the game (spend or earn \
-                     some), then enter the new value. This repeats until at most \
+                    "{count} places in memory hold that value. Change it in the game (spend or \
+                     earn some), then enter the new value. This repeats until at most \
                      {MAX_CANDIDATES} are left."
                 ));
-                *input = self.value_row(ui, "Next");
+                *input = self.value_row(ui, "Narrow down");
                 if let Some(i) = Self::changed_buttons(ui) {
                     *input = Some(i);
                 }
             }
             Step::Verify { remaining, phase } => {
-                ui.heading("2. Find the real one");
+                ui.heading("Find the real one");
                 match phase {
                     VerifyPhase::Consent => {
                         ui.label(format!(
-                            "{} addresses are left; usually only one of them is the value the \
+                            "{} places are left; usually only one of them is the value the \
                              game really uses.",
                             remaining.len()
                         ));
@@ -879,7 +907,7 @@ impl WizardWindow {
                         });
                     }
                     VerifyPhase::Pick => {
-                        ui.label("Pick the address to use:");
+                        ui.label("Pick the one to use:");
                         *input = self.candidate_list(ui, &remaining, true);
                     }
                     VerifyPhase::Testing { current, left } => {
@@ -905,7 +933,7 @@ impl WizardWindow {
                 }
             }
             Step::MakeLasting => {
-                ui.heading("3. Make it last");
+                ui.heading("Make it last");
                 self.tested_note(ui);
                 if let Some(a) = self.view.chosen {
                     ui.horizontal(|ui| {
@@ -939,7 +967,7 @@ impl WizardWindow {
                 }
             }
             Step::WaitRestart { process } => {
-                ui.heading("3. Make it last — restart the game");
+                ui.heading("Make it last: restart the game");
                 ui.label(format!(
                     "{} pointer chains lead to the value. Now restart the game: quit \
                      {process} completely, start it again and load your save. cheatu stays \
@@ -948,7 +976,7 @@ impl WizardWindow {
                 ));
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(format!("Waiting for a new {process} process…"));
+                    ui.label(format!("Waiting for {process} to start again…"));
                 });
                 ui.label(
                     egui::RichText::new(format!(
@@ -969,19 +997,16 @@ impl WizardWindow {
                 }
             }
             Step::Refind { count } => {
-                ui.heading("3. Make it last — find the value again");
+                ui.heading("Make it last: find the value again");
                 if count == 0 {
-                    ui.label(format!(
-                        "The game is back (pid {}). What is the value now?",
-                        self.view.pid
-                    ));
+                    ui.label("The game is back. What is the value now?");
                     *input = self.value_row(ui, "Search");
                 } else {
                     ui.label(format!(
-                        "{count} addresses hold that value. Change it in the game, then \
+                        "{count} places in memory hold that value. Change it in the game, then \
                          enter the new value."
                     ));
-                    *input = self.value_row(ui, "Next");
+                    *input = self.value_row(ui, "Narrow down");
                     if let Some(i) = Self::changed_buttons(ui) {
                         *input = Some(i);
                     }
@@ -997,7 +1022,7 @@ impl WizardWindow {
                 }
             }
             Step::Save { expr } => {
-                ui.heading("4. Save");
+                ui.heading("Save it");
                 self.tested_note(ui);
                 ui.horizontal(|ui| {
                     ui.label("Address:");
@@ -1038,7 +1063,7 @@ impl WizardWindow {
                 ui.radio_value(
                     &mut self.freeze,
                     false,
-                    "Save the value without freezing (use Set in the cheat table)",
+                    "Save the value without freezing (use Set in My cheats)",
                 );
                 let blocker = if self.name.trim().is_empty() {
                     Some("Give the cheat a name.")
@@ -1048,7 +1073,7 @@ impl WizardWindow {
                     None
                 };
                 if ui
-                    .add_enabled(blocker.is_none(), egui::Button::new("Add to cheat table"))
+                    .add_enabled(blocker.is_none(), egui::Button::new("Add to My cheats"))
                     .on_disabled_hover_text(blocker.unwrap_or(""))
                     .clicked()
                 {
@@ -1073,13 +1098,57 @@ impl WizardWindow {
     }
 }
 
-fn type_label(t: ScanType) -> String {
-    format!("{} ({t})", t.friendly_label())
+/// The kinds of number the guided steps offer, most common first. One
+/// type per label: signedness is not something to ask a beginner.
+pub const GUIDED_KINDS: [ScanType; 6] = [
+    ScanType::I32,
+    ScanType::I16,
+    ScanType::U8,
+    ScanType::I64,
+    ScanType::F32,
+    ScanType::F64,
+];
+
+fn kind_label(t: ScanType) -> String {
+    t.friendly_label()
+}
+
+/// Where the guided steps are on the step bar: 2 while finding the value, 3
+/// from checking it onwards.
+pub fn guided_step(step: &Step) -> u8 {
+    match step {
+        Step::AskValue | Step::Narrowing { .. } => 2,
+        _ => 3,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kind_label_has_no_rust_type_names() {
+        let labels: Vec<String> = GUIDED_KINDS.iter().map(|&t| kind_label(t)).collect();
+        assert_eq!(
+            labels,
+            ["4 Bytes", "2 Bytes", "Byte", "8 Bytes", "Float", "Double"]
+        );
+        for l in &labels {
+            for rust in [
+                "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64",
+            ] {
+                assert!(!l.contains(rust), "{l}");
+            }
+        }
+    }
+
+    #[test]
+    fn step_bar_position() {
+        assert_eq!(guided_step(&Step::AskValue), 2);
+        assert_eq!(guided_step(&Step::Narrowing { count: 9 }), 2);
+        assert_eq!(guided_step(&Step::MakeLasting), 3);
+        assert_eq!(guided_step(&Step::Failed("x".into())), 3);
+    }
     use cheatu_core::scan::NextScan;
     use cheatu_core::ScanType;
     use std::sync::Arc;

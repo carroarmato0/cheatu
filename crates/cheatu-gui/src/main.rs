@@ -1346,6 +1346,9 @@ struct CheatuApp {
     /// The pointer scan window, while open.
     pointer_window: Option<PointerWindow>,
     /// The "New cheat" wizard, while open.
+    /// The game the guided steps' wizard was started for (or followed to
+    /// after a restart); attaching to any other game restarts it.
+    wizard_for: Option<i32>,
     wizard: Option<WizardWindow>,
 
     // Background freeze.
@@ -2314,7 +2317,25 @@ impl eframe::App for CheatuApp {
 
         // ---- Header -----------------------------------------------------
         let screen = screen::screen(&self.screen_state());
-        let do_wizard = screen::wizard_runs(screen);
+        // The guided steps' wizard lives only while its screen is shown;
+        // leaving it (Advanced on, detach, another game) stops its work and
+        // never leaves the game paused (`WizardWindow::drop`).
+        let attached_pid = self.attached.as_ref().map(|(pid, _)| *pid);
+        if !screen::wizard_runs(screen)
+            || (self.wizard.is_some() && self.wizard_for != attached_pid)
+        {
+            self.wizard = None;
+        } else if self.wizard.is_none() {
+            if let Some((pid, name)) = self.attached.clone() {
+                match WizardWindow::new(pid, name) {
+                    Ok(w) => {
+                        self.wizard = Some(w);
+                        self.wizard_for = Some(pid);
+                    }
+                    Err(e) => self.status = format!("Cannot start the guided steps: {e}."),
+                }
+            }
+        }
         let mut do_detach = false;
         let mut advanced_changed = false;
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -2382,11 +2403,6 @@ impl eframe::App for CheatuApp {
         });
         if do_detach {
             self.detach();
-        }
-        if advanced_changed {
-            if let Err(e) = settings::save(&self.settings()) {
-                self.status = format!("Could not save the settings: {e}.");
-            }
         }
 
         // ---- Status bar -------------------------------------------------
@@ -2780,7 +2796,49 @@ impl eframe::App for CheatuApp {
                     return;
                 }
                 Screen::Guided => {
-                    ui.label("Follow the steps in the window.");
+                    let Some(mut w) = self.wizard.take() else {
+                        return;
+                    };
+                    start_screen::step_bar(ui, w.step());
+                    ui.add_space(6.0);
+                    w.set_pause(self.pause_while_scanning);
+                    let events = egui::ScrollArea::vertical()
+                        .show(ui, |ui| w.show_in(ui))
+                        .inner;
+                    for event in events {
+                        match event {
+                            WizardEvent::Save(entry) => {
+                                let attached = self.attached.as_ref().map(|(pid, _)| *pid);
+                                match cheat_table::wizard_entry(entry, w.pid(), attached) {
+                                    Ok((entry, status)) => {
+                                        self.status = status;
+                                        self.saved.push(GuiEntry::new(entry, false));
+                                    }
+                                    Err(e) => self.status = e,
+                                }
+                            }
+                            // Follow the guided steps to the restarted game, so
+                            // My cheats re-resolve there.
+                            WizardEvent::Reattached(pid) if self.scanning => {
+                                self.status = format!(
+                                    "The game restarted; attach to it once the search is done \
+                                     (pid {pid})."
+                                );
+                            }
+                            WizardEvent::Reattached(pid) => {
+                                do_attach = Some(pid);
+                                self.wizard_for = Some(pid);
+                            }
+                            WizardEvent::ScanManually { unknown } => {
+                                self.advanced = true;
+                                advanced_changed = true;
+                                if unknown {
+                                    self.unknown_initial = true;
+                                }
+                            }
+                        }
+                    }
+                    self.wizard = Some(w);
                     return;
                 }
                 Screen::Scanner => {}
@@ -3413,44 +3471,6 @@ impl eframe::App for CheatuApp {
             }
         }
 
-        // ---- Cheat wizard --------------------------------------------------
-        if do_wizard && self.wizard.is_none() {
-            if let Some((pid, name)) = self.attached.clone() {
-                match WizardWindow::new(pid, name) {
-                    Ok(w) => self.wizard = Some(w),
-                    Err(e) => self.status = format!("Cannot start the wizard: {e}."),
-                }
-            }
-        }
-        if let Some(mut w) = self.wizard.take() {
-            w.set_pause(self.pause_while_scanning);
-            for event in w.show(ctx) {
-                match event {
-                    WizardEvent::Save(entry) => {
-                        let attached = self.attached.as_ref().map(|(pid, _)| *pid);
-                        match cheat_table::wizard_entry(entry, w.pid(), attached) {
-                            Ok((entry, status)) => {
-                                self.status = status;
-                                self.saved.push(GuiEntry::new(entry, false));
-                            }
-                            Err(e) => self.status = e,
-                        }
-                    }
-                    // Follow the wizard to the restarted game, so the cheat
-                    // table re-resolves there.
-                    WizardEvent::Reattached(pid) if self.scanning => {
-                        self.status = format!(
-                            "The game restarted as pid {pid}; attach to it once the scan is done."
-                        );
-                    }
-                    WizardEvent::Reattached(pid) => self.attach(pid),
-                }
-            }
-            if w.is_open() {
-                self.wizard = Some(w);
-            }
-        }
-
         if let Some((pid, name)) = self.attach_offer.clone() {
             let mut close = false;
             egui::Window::new("Attach to the table's process?")
@@ -3478,6 +3498,11 @@ impl eframe::App for CheatuApp {
         }
 
         // ---- Apply deferred actions ------------------------------------
+        if advanced_changed {
+            if let Err(e) = settings::save(&self.settings()) {
+                self.status = format!("Could not save the settings: {e}.");
+            }
+        }
         if do_refresh_procs {
             self.procs = list_processes();
             self.procs_refreshed = Some(Instant::now());

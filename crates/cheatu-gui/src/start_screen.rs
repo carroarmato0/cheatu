@@ -165,7 +165,7 @@ pub fn step_bar(ui: &mut egui::Ui, current: u8) {
     ui.horizontal(|ui| {
         for (n, label) in [(1, "Choose your game"), (2, "Find a value"), (3, "Keep it")] {
             let text = if n < current {
-                egui::RichText::new(format!("✓ {n} {label}")).color(ok_color(ui))
+                egui::RichText::new(format!("✔ {n} {label}")).color(ok_color(ui))
             } else if n == current {
                 egui::RichText::new(format!("{n} {label}")).strong()
             } else {
