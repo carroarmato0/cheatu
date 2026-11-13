@@ -1382,6 +1382,17 @@ impl CheatuApp {
                     self.rpg_pick = RpgPick::Undecided;
                 }
                 self.attached_rpg = info.as_ref().and_then(|p| self.detections.get(p));
+                // Prefill RPG Maker mode with the game's folder.
+                if self.attached_rpg.is_some() {
+                    let folder = info.as_ref().and_then(|p| {
+                        let prefix =
+                            cheatu_core::process::env_var(p.pid, "WINEPREFIX").map(PathBuf::from);
+                        rpg_detect::rpg_folder_for(&p.cmdline, prefix.as_deref())
+                    });
+                    if let Some(dir) = folder {
+                        self.rpg.dir = dir.to_string_lossy().into_owned();
+                    }
+                }
                 self.rpg_setup = false;
                 self.attached = Some((pid, name));
                 self.scanner = Some(s);
@@ -1444,6 +1455,20 @@ impl CheatuApp {
             e.needs_resolve = true;
         }
         self.status = "Detached.".into();
+    }
+
+    /// The attached game's name for display: an RPG Maker game's folder
+    /// (its program is usually just "Game"), else the program name.
+    fn game_title(&self) -> String {
+        let Some((_, name)) = &self.attached else {
+            return String::new();
+        };
+        if self.attached_rpg.is_some() {
+            if let Some(folder) = Path::new(&self.rpg.dir).file_name() {
+                return folder.to_string_lossy().into_owned();
+            }
+        }
+        name.clone()
     }
 
     fn screen_state(&self) -> ScreenState {
@@ -2296,9 +2321,9 @@ impl eframe::App for CheatuApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("cheatu");
-                if let Some((_, name)) = &self.attached {
+                if self.attached.is_some() {
                     ui.separator();
-                    ui.menu_button(format!("{name} ▾"), |ui| {
+                    ui.menu_button(format!("{} ⏷", self.game_title()), |ui| {
                         if ui.button("Change game…").clicked() {
                             do_detach = true;
                             ui.close_menu();
@@ -2746,12 +2771,11 @@ impl eframe::App for CheatuApp {
                     return;
                 }
                 Screen::RpgChoice => {
-                    ui.heading("This is an RPG Maker game");
-                    if ui.button("Use RPG Maker mode").clicked() {
-                        self.rpg_pick = RpgPick::RpgMaker;
-                    }
-                    if ui.button("Scan memory").clicked() {
-                        self.rpg_pick = RpgPick::Memory;
+                    let name = self.game_title();
+                    if let Some(engine) = self.attached_rpg {
+                        if let Some(pick) = start_screen::rpg_choice(ui, &name, engine) {
+                            self.rpg_pick = pick;
+                        }
                     }
                     return;
                 }

@@ -59,6 +59,12 @@ pub fn game_dir(cmdline: &str, prefix: Option<&Path>) -> Option<(PathBuf, Engine
     })
 }
 
+/// The folder to prefill in RPG Maker mode for a running game: where its
+/// RPG Maker files were found.
+pub fn rpg_folder_for(cmdline: &str, prefix: Option<&Path>) -> Option<PathBuf> {
+    game_dir(cmdline, prefix).map(|(dir, _)| dir)
+}
+
 /// Detection results per pid, so the game list does not hit the disk every
 /// frame.
 #[derive(Default)]
@@ -158,6 +164,17 @@ mod tests {
         touch(&d.join("drive_c/Program Files/Sakura/Game.exe"));
         let cmd = "C:\\Program Files\\Sakura\\Game.exe --no-sandbox";
         assert_eq!(detect_game(cmd, Some(&d)), Some(Engine::RpgMakerMZ));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn rpg_folder_prefill_uses_detected_dir() {
+        let d = tmp("prefill");
+        touch(&d.join("G/www/js/rpg_core.js"));
+        touch(&d.join("G/bin/nw"));
+        let cmd = format!("{}/G/bin/nw --x", d.display());
+        assert_eq!(rpg_folder_for(&cmd, None), Some(d.join("G")));
+        assert_eq!(rpg_folder_for("/bin/ls", None), None);
         fs::remove_dir_all(&d).unwrap();
     }
 

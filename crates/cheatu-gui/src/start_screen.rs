@@ -416,6 +416,83 @@ pub fn start_screen(
     action
 }
 
+/// After attaching to an RPG Maker game: RPG Maker mode or the scanner.
+pub fn rpg_choice(ui: &mut egui::Ui, name: &str, engine: Engine) -> Option<crate::screen::RpgPick> {
+    use crate::screen::RpgPick;
+    let mut pick = None;
+    ui.add_space(8.0);
+    ui.heading(format!("{name} is an {} game", engine.label()));
+    ui.label(egui::RichText::new("cheatu can change it in two ways.").weak());
+    ui.add_space(10.0);
+    let card =
+        |ui: &mut egui::Ui, recommended: bool, title: &str, bullets: &[&str], button: &str| {
+            let mut clicked = false;
+            let mut frame = egui::Frame::group(ui.style()).inner_margin(12.0);
+            if recommended {
+                frame = frame.stroke(egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill));
+            }
+            frame.show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(300.0);
+                    if recommended {
+                        ui.label(
+                            egui::RichText::new("RECOMMENDED")
+                                .small()
+                                .strong()
+                                .color(ui.visuals().selection.bg_fill),
+                        );
+                    }
+                    ui.label(egui::RichText::new(title).strong().size(16.0));
+                    for b in bullets {
+                        ui.label(format!("• {b}"));
+                    }
+                    ui.add_space(6.0);
+                    let mut btn = egui::Button::new(button);
+                    if recommended {
+                        btn = btn.fill(ui.visuals().selection.bg_fill);
+                    }
+                    clicked = ui.add(btn).clicked();
+                })
+            });
+            clicked
+        };
+    ui.horizontal_top(|ui| {
+        if card(
+            ui,
+            true,
+            "🎮 RPG Maker mode",
+            &[
+                "Gold, items, party HP/MP, switches",
+                "Through the game's own code: nothing corrupts",
+                "One-time setup, then restart the game",
+            ],
+            "Use RPG Maker mode",
+        ) {
+            pick = Some(RpgPick::RpgMaker);
+        }
+        if card(
+            ui,
+            false,
+            "🔍 Memory scanner",
+            &[
+                "Any number you can see",
+                "Works right now, no restart",
+                "Cheats may break after an update",
+            ],
+            "Scan memory",
+        ) {
+            pick = Some(RpgPick::Memory);
+        }
+    });
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Switch later from the game's name in the header (⏷).")
+            .weak()
+            .small(),
+    );
+    pick
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
