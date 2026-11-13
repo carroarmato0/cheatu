@@ -12,11 +12,13 @@ mod pointer_window;
 mod rpg_detect;
 mod screen;
 mod settings;
+mod start_screen;
 mod theme;
 mod wizard;
 mod wizard_ui;
 
 use screen::{RpgPick, Screen, ScreenState};
+use start_screen::{GameRow, ListAction, ListState};
 use theme::{SystemTheme, Theme, ThemePref};
 
 use std::collections::HashMap;
@@ -32,8 +34,8 @@ use cheatu_core::scan::{
 };
 use cheatu_core::table::{self, CheatTable};
 use cheatu_core::{
-    human_bytes, list_processes, privilege, probe_address, read_maps, region_for, Mem,
-    ProbeOutcome, ScanType, ScanValue,
+    list_processes, privilege, probe_address, read_maps, region_for, Mem, ProbeOutcome, ScanType,
+    ScanValue,
 };
 use cheatu_core::{AddrExpr, LiveSource, MemSource};
 use cheatu_inject::{agent, detect_dir, find_rpgmaker_games, scan_dir, Engine, FoundGame};
@@ -368,14 +370,8 @@ impl NextMode {
     }
 }
 
-/// Column used to sort the process picker.
-#[derive(Copy, Clone, PartialEq, Eq, Default)]
-enum ProcSort {
-    #[default]
-    Memory,
-    Pid,
-    Name,
-}
+/// How often the game list refreshes while it is on screen.
+const PROC_REFRESH: Duration = Duration::from_secs(3);
 
 /// Column used to sort the results table.
 ///
@@ -1274,13 +1270,14 @@ struct CheatuApp {
 
     // Process picker.
     show_picker: bool,
-    proc_filter: String,
+    /// The game list's filter, selection and sort.
+    list: ListState,
+    /// The game list, one row per program (see `start_screen::fold`).
+    game_rows: Vec<GameRow>,
+    procs_refreshed: Option<Instant>,
     procs: Vec<ProcInfo>,
-    picker_sort: ProcSort,
     /// Column the results table is sorted by.
     res_sort: ResSort,
-    picker_wine_only: bool,
-    picker_selected: Option<i32>,
 
     // Scan controls.
     type_sel: TypeSel,
@@ -1421,8 +1418,7 @@ impl CheatuApp {
                 // and re-attach. Any other error isn't fixed by elevation.
                 if e.kind() == std::io::ErrorKind::PermissionDenied && !privilege::is_root() {
                     self.needs_elevation = Some(pid);
-                    self.status =
-                        format!("pid {pid} needs elevated access — use \"Elevate & attach\".");
+                    self.status = "This game needs admin rights.".into();
                 } else {
                     self.needs_elevation = None;
                     self.status = format!("Failed to attach to pid {pid}: {e}.");
@@ -2192,7 +2188,7 @@ impl CheatuApp {
                     _ => {
                         // Several: let the user pick, filtered to the name.
                         self.procs = procs;
-                        self.proc_filter = want.clone();
+                        self.list.filter = want.clone();
                         self.show_picker = true;
                     }
                 }
@@ -2727,12 +2723,26 @@ impl eframe::App for CheatuApp {
                     return;
                 }
                 Screen::ChooseGame => {
-                    // Until the start screen lands: the list opens by itself.
-                    if !self.show_picker {
-                        self.show_picker = true;
+                    // Keep the list current while it is on screen.
+                    if self
+                        .procs_refreshed
+                        .is_none_or(|t| t.elapsed() >= PROC_REFRESH)
+                    {
                         do_refresh_procs = true;
                     }
-                    ui.heading("Which game do you want to cheat in?");
+                    match start_screen::start_screen(
+                        ui,
+                        &mut self.list,
+                        &self.procs,
+                        &self.game_rows,
+                        self.advanced,
+                    ) {
+                        Some(ListAction::Attach(pid)) => do_attach = Some(pid),
+                        Some(ListAction::Refresh) => do_refresh_procs = true,
+                        Some(ListAction::OpenTable) => open_dialog = Some(DialogPurpose::OpenTable),
+                        Some(ListAction::RpgSetup) => self.rpg_setup = true,
+                        None => {}
+                    }
                     return;
                 }
                 Screen::RpgChoice => {
@@ -3166,19 +3176,13 @@ impl eframe::App for CheatuApp {
                 });
         });
 
-        // ---- Process picker window -------------------------------------
+        // ---- Process list window (a table's game runs more than once) -----
         if self.show_picker {
             let mut open = true;
             let mut close = false;
-            let mut selected = self.picker_selected;
-            let sort = self.picker_sort;
-            let mut new_sort = sort;
-
-            // Constrain to the viewport and center it, so the action bar at the
-            // bottom is always on-screen no matter how long the list is.
-            let screen = ctx.screen_rect();
-            let max_h = (screen.height() - 48.0).max(260.0);
-            egui::Window::new("Select a process")
+            let screen_rect = ctx.screen_rect();
+            let max_h = (screen_rect.height() - 48.0).max(260.0);
+            egui::Window::new("Choose the game")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(true)
@@ -3187,185 +3191,37 @@ impl eframe::App for CheatuApp {
                 .max_height(max_h)
                 .min_width(540.0)
                 .show(ctx, |ui| {
-                    // Search / filter controls.
-                    ui.horizontal(|ui| {
-                        ui.label("🔎");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.proc_filter)
-                                .hint_text("filter by name or command")
-                                .desired_width(240.0),
-                        );
-                        ui.checkbox(&mut self.picker_wine_only, "Wine/Proton only");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("⟳ Refresh").clicked() {
-                                do_refresh_procs = true;
-                            }
-                        });
-                    });
-                    ui.label(
-                        egui::RichText::new(
-                            "Tip: sort by Memory and tick “Wine/Proton only”. For a Chromium / \
-                             NW.js game (RPG Maker MV/MZ), attach to the largest process whose \
-                             Role is “renderer”.",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                    ui.separator();
-
-                    // Build the filtered, sorted view.
-                    let filter = self.proc_filter.to_ascii_lowercase();
-                    let wine_only = self.picker_wine_only;
-                    let mut rows: Vec<&ProcInfo> = self
-                        .procs
-                        .iter()
-                        .filter(|p| {
-                            (!wine_only || p.is_wine)
-                                && (filter.is_empty()
-                                    || p.name.to_ascii_lowercase().contains(&filter)
-                                    || p.cmdline.to_ascii_lowercase().contains(&filter)
-                                    || p.role.as_deref().is_some_and(|r| r.contains(&filter)))
-                        })
-                        .collect();
-                    match sort {
-                        ProcSort::Memory => rows.sort_by_key(|p| std::cmp::Reverse(p.rss_bytes)),
-                        ProcSort::Pid => rows.sort_by_key(|p| p.pid),
-                        ProcSort::Name => rows.sort_by(|a, b| {
-                            a.name
-                                .to_ascii_lowercase()
-                                .cmp(&b.name.to_ascii_lowercase())
-                        }),
+                    let height = (screen_rect.height() - 240.0).clamp(140.0, 820.0);
+                    match start_screen::game_list(
+                        ui,
+                        &mut self.list,
+                        &self.procs,
+                        &self.game_rows,
+                        self.advanced,
+                        height,
+                    ) {
+                        Some(ListAction::Attach(pid)) => do_attach = Some(pid),
+                        Some(ListAction::Refresh) => do_refresh_procs = true,
+                        _ => {}
                     }
-                    let count = rows.len();
-                    // Never attach to a row the filter hides: move a hidden
-                    // selection to the first visible row (or clear it).
-                    if !selected.is_some_and(|pid| rows.iter().any(|p| p.pid == pid)) {
-                        selected = rows.first().map(|p| p.pid);
-                    }
-
-                    // Leave room for the action bar at the bottom.
-                    // Fixed, screen-derived height leaves room for the action
-                    // bar below; the table scrolls internally past that.
-                    let screen_h = ui.ctx().screen_rect().height();
-                    let table_height = (screen_h - 240.0).clamp(140.0, 820.0);
-
-                    use egui_extras::{Column, TableBuilder};
-                    TableBuilder::new(ui)
-                        .striped(true)
-                        .sense(egui::Sense::click())
-                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                        .max_scroll_height(table_height)
-                        .column(Column::auto().at_least(56.0).resizable(true))
-                        .column(Column::auto().at_least(88.0).resizable(true))
-                        .column(Column::auto().at_least(150.0).resizable(true))
-                        .column(Column::auto().at_least(84.0).resizable(true))
-                        .column(Column::remainder())
-                        .header(22.0, |mut header| {
-                            header.col(|ui| {
-                                if sort_header(ui, "PID", sort == ProcSort::Pid).clicked() {
-                                    new_sort = ProcSort::Pid;
-                                }
-                            });
-                            header.col(|ui| {
-                                if sort_header(ui, "Memory", sort == ProcSort::Memory).clicked() {
-                                    new_sort = ProcSort::Memory;
-                                }
-                            });
-                            header.col(|ui| {
-                                if sort_header(ui, "Process", sort == ProcSort::Name).clicked() {
-                                    new_sort = ProcSort::Name;
-                                }
-                            });
-                            header.col(|ui| {
-                                ui.strong("Role");
-                            });
-                            header.col(|ui| {
-                                ui.strong("Command");
-                            });
-                        })
-                        .body(|body| {
-                            body.rows(22.0, count, |mut row| {
-                                let p = rows[row.index()];
-                                row.set_selected(selected == Some(p.pid));
-                                row.col(|ui| {
-                                    ui.monospace(p.pid.to_string());
-                                });
-                                row.col(|ui| {
-                                    ui.monospace(human_bytes(p.rss_bytes));
-                                });
-                                row.col(|ui| {
-                                    if !p.accessible {
-                                        ui.label(egui::RichText::new("🔒").color(warn_color(ui)))
-                                            .on_hover_text(
-                                                "Needs elevated access to scan (attach will \
-                                             prompt to elevate)",
-                                            );
-                                    }
-                                    let mut text = egui::RichText::new(&p.name).strong();
-                                    if p.is_wine {
-                                        text = text.color(wine_color(ui));
-                                    }
-                                    ui.add(egui::Label::new(text).truncate());
-                                    if p.is_wine {
-                                        ui.label(
-                                            egui::RichText::new("proton")
-                                                .small()
-                                                .color(wine_color(ui)),
-                                        );
-                                    }
-                                });
-                                row.col(|ui| {
-                                    if let Some(role) = &p.role {
-                                        // Highlight "renderer" — the game process
-                                        // for Chromium/NW.js titles.
-                                        let color = if role == "renderer" {
-                                            ok_color(ui)
-                                        } else {
-                                            ui.visuals().weak_text_color()
-                                        };
-                                        ui.label(egui::RichText::new(role).small().color(color));
-                                    }
-                                });
-                                row.col(|ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&p.cmdline).weak().small(),
-                                        )
-                                        .truncate(),
-                                    );
-                                });
-                                let resp = row.response();
-                                if resp.clicked() {
-                                    selected = Some(p.pid);
-                                }
-                                if resp.double_clicked() {
-                                    do_attach = Some(p.pid);
-                                }
-                            });
-                        });
-
-                    // Action bar.
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("{count} processes")).weak());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Cancel").clicked() {
                                 close = true;
                             }
                             if ui
-                                .add_enabled(selected.is_some(), egui::Button::new("Attach"))
+                                .add_enabled(
+                                    self.list.selected.is_some(),
+                                    egui::Button::new("Attach"),
+                                )
                                 .clicked()
                             {
-                                if let Some(pid) = selected {
-                                    do_attach = Some(pid);
-                                }
+                                do_attach = self.list.selected;
                             }
                         });
                     });
                 });
-
-            self.picker_selected = selected;
-            self.picker_sort = new_sort;
             if !open || close {
                 self.show_picker = false;
             }
@@ -3600,13 +3456,17 @@ impl eframe::App for CheatuApp {
         // ---- Apply deferred actions ------------------------------------
         if do_refresh_procs {
             self.procs = list_processes();
-            // Preselect the most likely game: the heaviest Wine/Proton process,
-            // else the heaviest process overall. Saves hunting through helpers.
+            self.procs_refreshed = Some(Instant::now());
+            let detections = &mut self.detections;
+            self.game_rows = start_screen::fold(&self.procs, &mut |p| detections.get(p));
+            // Preselect the most likely game, unless the user picked one
+            // that is still running.
             let still_valid = self
-                .picker_selected
+                .list
+                .selected
                 .is_some_and(|pid| self.procs.iter().any(|p| p.pid == pid));
             if !still_valid {
-                self.picker_selected = pick_best_process(&self.procs);
+                self.list.selected = start_screen::best_guess(&self.game_rows);
             }
         }
         if let Some(pid) = do_attach {
@@ -3753,26 +3613,6 @@ impl eframe::App for CheatuApp {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
     }
-}
-
-/// Best guess at the process a user wants to attach to.
-///
-/// For a Chromium/NW.js game (RPG Maker MV/MZ) the data lives in the largest
-/// `renderer`; otherwise fall back to the heaviest Wine/Proton process, then
-/// the heaviest process overall.
-fn pick_best_process(procs: &[ProcInfo]) -> Option<i32> {
-    procs
-        .iter()
-        .filter(|p| p.role.as_deref() == Some("renderer"))
-        .max_by_key(|p| p.rss_bytes)
-        .or_else(|| {
-            procs
-                .iter()
-                .filter(|p| p.is_wine)
-                .max_by_key(|p| p.rss_bytes)
-        })
-        .or_else(|| procs.iter().max_by_key(|p| p.rss_bytes))
-        .map(|p| p.pid)
 }
 
 /// A borderless, clickable column header that shows a ⬇ marker when active.
