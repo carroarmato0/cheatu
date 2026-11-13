@@ -199,6 +199,18 @@ pub(crate) fn find_matches(
     module: Option<&str>,
     limit: usize,
 ) -> Result<Vec<u64>, ResolveError> {
+    find_matches_with(src, pat, module, limit, None)
+}
+
+/// [`find_matches`], counting chunks in `progress` and stopping early (with
+/// what it found so far) once it is cancelled.
+pub(crate) fn find_matches_with(
+    src: &dyn MemSource,
+    pat: &[Option<u8>],
+    module: Option<&str>,
+    limit: usize,
+    progress: Option<&crate::scan::ScanProgress>,
+) -> Result<Vec<u64>, ResolveError> {
     if let Some(m) = module {
         module_base(src.regions(), m)?;
     }
@@ -209,12 +221,21 @@ pub(crate) fn find_matches(
     let overlap = pat.len() - 1;
     let mut buf = vec![0u8; AOB_CHUNK + overlap];
     let regions = src.regions();
+    let in_module =
+        |i: usize, m: &str| image_path(regions, i).and_then(|p| p.rsplit('/').next()) == Some(m);
+    if let Some(p) = progress {
+        let chunks: u64 = regions
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| r.read && module.is_none_or(|m| in_module(*i, m)))
+            .map(|(_, r)| (r.end - r.start).div_ceil(AOB_CHUNK as u64))
+            .sum();
+        p.begin(chunks as usize);
+    }
     'regions: for (i, r) in regions.iter().enumerate() {
         // A module's anonymous `.bss` tail counts as part of it (see
         // `image_path`).
-        let in_module =
-            |m: &str| image_path(regions, i).and_then(|p| p.rsplit('/').next()) == Some(m);
-        if !r.read || module.is_some_and(|m| !in_module(m)) {
+        if !r.read || module.is_some_and(|m| !in_module(i, m)) {
             continue;
         }
         let mut start = r.start;
@@ -239,19 +260,15 @@ pub(crate) fn find_matches(
                 }
             }
             start += step as u64;
+            if let Some(p) = progress {
+                p.advance(1);
+                if p.cancelled() {
+                    break 'regions;
+                }
+            }
         }
     }
     Ok(found)
-}
-
-/// Number of matches of `pat`, counting at most `limit`.
-pub(crate) fn count_matches(
-    src: &dyn MemSource,
-    pat: &[Option<u8>],
-    module: Option<&str>,
-    limit: usize,
-) -> Result<usize, ResolveError> {
-    Ok(find_matches(src, pat, module, limit)?.len())
 }
 
 fn resolve_aob(

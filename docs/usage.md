@@ -234,6 +234,9 @@ someone else.
   the address that survives restarts; best for code and static data) and
   **🎯 Pointer scan…** (see [Pointer scanner](#pointer-scanner); the right tool
   for values on the heap).
+  Making a signature reads all of the game's memory once, which can take a
+  while in a big game: the row shows *Making a signature…*, the status bar a
+  progress bar with **Cancel**, and the result appears next to the button.
 - **Opening a table never writes to the game's memory.** All freezes start
   off, whatever the file says; a cheat that was frozen when saved says so in
   its details (*Was frozen when saved*) until you freeze it again. This makes it safe to open a

@@ -5,12 +5,16 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cheatu_core::source::MemSource;
-use cheatu_core::{make_signature, AddrExpr, Expr, MemoryRegion, SignatureError};
+use cheatu_core::{
+    make_signature, make_signature_with, AddrExpr, Expr, MemoryRegion, ScanProgress, SignatureError,
+};
 
 struct Fake {
     regions: Vec<MemoryRegion>,
     data: Vec<(u64, Vec<u8>)>,
     reads: AtomicUsize,
+    /// Reads of 1 KiB or more: passes over memory, not context or checks.
+    big_reads: AtomicUsize,
     /// Address whose byte differs on the second read only.
     flip: Option<u64>,
 }
@@ -21,6 +25,9 @@ impl MemSource for Fake {
     }
     fn read(&self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
         let nth = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if buf.len() >= 1024 {
+            self.big_reads.fetch_add(1, Ordering::SeqCst);
+        }
         for (base, bytes) in &self.data {
             let end = base + bytes.len() as u64;
             if addr >= *base && addr < end {
@@ -68,6 +75,7 @@ fn fake(regions: Vec<MemoryRegion>, data: Vec<(u64, Vec<u8>)>, flip: Option<u64>
         regions,
         data,
         reads: AtomicUsize::new(0),
+        big_reads: AtomicUsize::new(0),
         flip,
     }
 }
@@ -220,4 +228,69 @@ fn unnameable_module_is_left_out_of_the_pattern() {
     assert_eq!(parts(&sig).1, None);
     assert!(sig.validate().is_ok());
     assert_eq!(sig.resolve(&src).unwrap(), addr);
+}
+
+/// The 8-byte window around the value occurs many times, the 24-byte one
+/// once: memory is searched in one pass, the longer windows are only checked
+/// where the short one matched.
+#[test]
+fn longer_windows_are_checked_without_new_passes() {
+    let base = 0x10000;
+    let mut bytes = random_bytes(8192);
+    // Ten copies of the 8 bytes around the target, elsewhere in memory.
+    let addr_off = 5000usize;
+    let core: Vec<u8> = bytes[addr_off - 4..addr_off + 4].to_vec();
+    for k in 0..10 {
+        let at = 300 + k * 200;
+        bytes[at..at + 8].copy_from_slice(&core);
+    }
+    let src = fake(
+        vec![region(base, 8192, "[heap]")],
+        vec![(base, bytes)],
+        None,
+    );
+    let addr = base + addr_off as u64;
+    let sig = make_signature(&src, addr, 64).unwrap();
+    assert_eq!(sig.resolve(&src).unwrap(), addr);
+    let (pattern, _, _) = parts(&sig);
+    assert_eq!(
+        pattern.split(' ').count(),
+        16,
+        "first unique window: 16 bytes"
+    );
+    // One pass to sign; resolving it above is another.
+    assert_eq!(
+        src.big_reads.load(Ordering::SeqCst),
+        2,
+        "one pass, then the resolve"
+    );
+}
+
+#[test]
+fn signature_reports_progress() {
+    let base = 0x10000;
+    let src = fake(
+        vec![region(base, 4096, "[heap]")],
+        vec![(base, random_bytes(4096))],
+        None,
+    );
+    let progress = ScanProgress::default();
+    make_signature_with(&src, base + 2000, 64, &progress).unwrap();
+    assert_eq!(progress.fraction(), Some(1.0));
+}
+
+#[test]
+fn cancelled_signature_stops() {
+    let base = 0x10000;
+    let src = fake(
+        vec![region(base, 4096, "[heap]")],
+        vec![(base, random_bytes(4096))],
+        None,
+    );
+    let progress = ScanProgress::default();
+    progress.cancel();
+    assert_eq!(
+        make_signature_with(&src, base + 2000, 64, &progress),
+        Err(SignatureError::Cancelled)
+    );
 }

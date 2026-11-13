@@ -1358,6 +1358,11 @@ struct CheatuApp {
     /// The one "Make AoB signature" running in the background.
     sig_pending: Option<Receiver<cheat_table::BgSignature>>,
     /// The pointer scan window, while open.
+    /// The cheat a signature is being made for, and its progress.
+    sig_row: Option<u64>,
+    sig_progress: Option<Arc<ScanProgress>>,
+    /// Where to report the finished signature.
+    sig_at: Option<eframe::egui::Rect>,
     pointer_window: Option<PointerWindow>,
     /// Which My cheats rows are unfolded or being renamed.
     cheats_ui: my_cheats::PanelState,
@@ -1503,6 +1508,9 @@ impl CheatuApp {
             p.cancel();
         }
         self.probe_cancel.store(true, Ordering::Relaxed);
+        if let Some(p) = &self.sig_progress {
+            p.cancel();
+        }
         self.attached = None;
         self.scanner = None;
         self.live = None;
@@ -2088,7 +2096,7 @@ impl CheatuApp {
 
     /// Start "Make AoB signature" for row `i` on a background thread: it
     /// scans memory and waits between two reads.
-    fn start_signature(&mut self, i: usize) {
+    fn start_signature(&mut self, i: usize, at: Option<eframe::egui::Rect>) {
         let Some(pid) = self.attached.as_ref().map(|(p, _)| *p) else {
             self.status = "Attach to a game first.".into();
             return;
@@ -2106,11 +2114,15 @@ impl CheatuApp {
         }
         let (id, expr, generation) = (e.id, e.entry.address.clone(), self.resolve_generation);
         let (tx, rx) = mpsc::channel();
+        let progress = Arc::new(ScanProgress::default());
         self.sig_pending = Some(rx);
-        self.status = format!("Making an AoB signature for 0x{addr:x}…");
+        self.sig_row = Some(id);
+        self.sig_progress = Some(progress.clone());
+        self.sig_at = at;
+        self.status = "Making a signature…".into();
         std::thread::spawn(move || {
             let result = match LiveSource::open(pid) {
-                Ok(src) => cheatu_core::make_signature(&src, addr, 64),
+                Ok(src) => cheatu_core::make_signature_with(&src, addr, 64, &progress),
                 Err(_) => Err(cheatu_core::SignatureError::Unreadable(addr)),
             };
             let _ = tx.send(cheat_table::BgSignature {
@@ -2124,13 +2136,22 @@ impl CheatuApp {
     }
 
     /// Apply a finished "Make AoB signature".
+    /// A signature run ended: forget its state; returns where to report.
+    fn finish_signature(&mut self) -> Option<eframe::egui::Rect> {
+        self.sig_pending = None;
+        self.sig_row = None;
+        self.sig_progress = None;
+        self.sig_at.take()
+    }
+
     fn poll_signature(&mut self) {
         let Some(rx) = &self.sig_pending else {
             return;
         };
         match rx.try_recv() {
             Ok(r) => {
-                self.sig_pending = None;
+                let cancelled = matches!(r.result, Err(cheatu_core::SignatureError::Cancelled));
+                let at = self.finish_signature();
                 let pid = self.attached.as_ref().map(|(p, _)| *p).unwrap_or(0);
                 let (changed, status) =
                     cheat_table::apply_signature(&mut self.saved, pid, self.resolve_generation, r);
@@ -2138,10 +2159,22 @@ impl CheatuApp {
                 if changed {
                     self.resolve_generation += 1;
                 }
+                if let Some(at) = at {
+                    let now = Instant::now();
+                    if changed {
+                        self.feedback.ok(
+                            at,
+                            "✔ Signature made: keeps working after a restart",
+                            now,
+                        );
+                    } else if !cancelled {
+                        self.feedback.error(at, status.clone(), now);
+                    }
+                }
                 self.status = status;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.sig_pending = None;
+                self.finish_signature();
                 self.status = "Making the AoB signature failed.".into();
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -2454,7 +2487,7 @@ impl eframe::App for CheatuApp {
         // Index of the cheat table row whose value should be written once.
         let mut do_set: Option<(usize, egui::Rect)> = None;
         // Row to make an AoB signature for / to pointer scan.
-        let mut do_signature: Option<usize> = None;
+        let mut do_signature: Option<(usize, Option<egui::Rect>)> = None;
         let mut do_ptr_scan: Option<usize> = None;
         // Results column header the user clicked, applied once the table has
         // let go of `self.display`.
@@ -2594,6 +2627,23 @@ impl eframe::App for CheatuApp {
                         self.probe_cancel.store(true, Ordering::Relaxed);
                     }
                 }
+                // Making a signature reads all of the game's memory.
+                if let Some(p) = &self.sig_progress {
+                    ui.spinner();
+                    ui.label("Making a signature…");
+                    ui.add(
+                        egui::ProgressBar::new(p.fraction().unwrap_or(0.0))
+                            .desired_width(120.0)
+                            .show_percentage(),
+                    );
+                    if ui
+                        .button("Cancel")
+                        .on_hover_text("Stop; the cheat stays as it is")
+                        .clicked()
+                    {
+                        p.cancel();
+                    }
+                }
             });
         });
 
@@ -2609,6 +2659,7 @@ impl eframe::App for CheatuApp {
                 can_read: self.attached.is_some() && self.live.is_some(),
                 aob_busy: self.aob_pending.is_some(),
                 sig_busy: self.sig_pending.is_some(),
+                sig_row: self.sig_row,
                 live_error: self.live_error.as_deref(),
                 scanner: self.scanner.as_ref(),
                 path: self.table_path.as_deref(),
@@ -2638,13 +2689,13 @@ impl eframe::App for CheatuApp {
                     }
                 }
                 Action::PointerScan(i) => do_ptr_scan = Some(i),
-                Action::Signature(i) => do_signature = Some(i),
-                Action::MakeLasting(i) => {
+                Action::Signature(i, at) => do_signature = Some((i, Some(at))),
+                Action::MakeLasting(i, at) => {
                     let addr = self.saved.get(i).and_then(|e| e.resolved.clone().ok());
                     let regions = self.live.as_ref().map(|l| l.regions());
                     if let (Some(addr), Some(regions)) = (addr, regions) {
                         match my_cheats::make_lasting_tool(regions, addr) {
-                            my_cheats::MakeLasting::Signature => do_signature = Some(i),
+                            my_cheats::MakeLasting::Signature => do_signature = Some((i, Some(at))),
                             my_cheats::MakeLasting::PointerScan => do_ptr_scan = Some(i),
                         }
                     }
@@ -3647,8 +3698,8 @@ impl eframe::App for CheatuApp {
                 }
             }
         }
-        if let Some(i) = do_signature {
-            self.start_signature(i);
+        if let Some((i, at)) = do_signature {
+            self.start_signature(i, at);
         }
         // Remove in reverse so indices stay valid.
         remove_from_table.sort_unstable();
@@ -3864,6 +3915,23 @@ mod tests {
         // M8: the title stays the detected folder while the field is edited.
         app.rpg.dir = "/somewhere/else".into();
         assert_eq!(app.game_title(), "Sakura Quest");
+    }
+
+    /// Making a signature shows its progress on the row, and Detach stops it.
+    #[test]
+    fn signature_shows_progress_and_detach_cancels_it() {
+        let mut app = CheatuApp {
+            attached: Some((own_pid(), "me".into())),
+            saved: vec![cheat("0x1000", "1", false)],
+            ..Default::default()
+        };
+        app.saved[0].resolved = Ok(0x1000);
+        app.start_signature(0, None);
+        let id = app.saved[0].id;
+        assert_eq!(app.sig_row, Some(id));
+        let progress = app.sig_progress.clone().expect("progress to show");
+        app.detach();
+        assert!(progress.is_cancelled(), "detach stops it");
     }
 
     /// M5: removing every cheat on purpose leaves nothing to save.

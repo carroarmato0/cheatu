@@ -286,6 +286,11 @@ impl ScanProgress {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// A cancel was asked for and not yet taken by the work it stops.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled()
+    }
+
     /// How much of the scan is done, in `0.0..=1.0`. `None` when no scan has
     /// sized itself yet — a scan of nothing has no meaningful fraction.
     pub fn fraction(&self) -> Option<f32> {

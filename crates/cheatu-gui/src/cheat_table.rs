@@ -261,6 +261,7 @@ pub fn apply_signature(
     let expr = match r.result {
         Ok(expr) => expr,
         Err(SignatureError::NotUnique) => return (false, NOT_UNIQUE.into()),
+        Err(SignatureError::Cancelled) => return (false, "Signature cancelled.".into()),
         Err(e) => return (false, format!("No AoB signature: {e}.")),
     };
     let row = entries
@@ -351,6 +352,25 @@ pub fn processes_named(procs: &[ProcInfo], name: &str) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_signature_says_so() {
+        let mut rows = vec![GuiEntry::new(
+            entry_for_address(&[], 0x1000, ScanType::I32),
+            false,
+        )];
+        let r = BgSignature {
+            id: rows[0].id,
+            expr: rows[0].entry.address.clone(),
+            pid: 1,
+            generation: 0,
+            result: Err(SignatureError::Cancelled),
+        };
+        assert_eq!(
+            apply_signature(&mut rows, 1, 0, r),
+            (false, "Signature cancelled.".to_string())
+        );
+    }
 
     #[test]
     fn duplicate_add_is_detected() {

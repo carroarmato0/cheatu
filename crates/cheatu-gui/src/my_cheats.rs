@@ -68,9 +68,9 @@ pub enum Action {
     /// Write row `.0`'s value once; feedback goes next to `.1`.
     Set(usize, egui::Rect),
     Remove(usize),
-    MakeLasting(usize),
+    MakeLasting(usize, egui::Rect),
     PointerScan(usize),
-    Signature(usize),
+    Signature(usize, egui::Rect),
     ChangeType(usize, ScanType),
     /// An address expression was changed.
     ExprEdited,
@@ -83,6 +83,8 @@ pub struct Ctx<'a> {
     pub can_read: bool,
     pub aob_busy: bool,
     pub sig_busy: bool,
+    /// The cheat a signature is being made for.
+    pub sig_row: Option<u64>,
     pub live_error: Option<&'a str>,
     pub scanner: Option<&'a Scanner>,
     pub path: Option<&'a Path>,
@@ -150,6 +152,14 @@ fn value_and_set(ui: &mut egui::Ui, e: &mut GuiEntry) -> Option<egui::Rect> {
             "Not a valid value for this kind of number."
         });
     set.clicked().then_some(set.rect)
+}
+
+/// In place of a button while its signature is being made (progress and
+/// Cancel are in the status bar).
+fn signing(ui: &mut egui::Ui) {
+    ui.spinner();
+    ui.label(egui::RichText::new("Making a signature…").small())
+        .on_hover_text("Reading the game's memory; see the status bar for progress");
 }
 
 /// Draw the panel and return what the app must do.
@@ -292,14 +302,21 @@ fn basic_row(
                     .small()
                     .color(warn_color(ui)),
             );
-            let usable = cx.can_read && e.resolved.is_ok() && !cx.sig_busy;
-            if ui
-                .add_enabled(usable, egui::Button::new("Make it last…").small())
-                .on_hover_text("Find this value in a way that survives restarts")
-                .on_disabled_hover_text("Attach to the game, and let the cheat be found first.")
-                .clicked()
-            {
-                out.push(Action::MakeLasting(i));
+            if cx.sig_row == Some(e.id) {
+                signing(ui);
+            } else {
+                let usable = cx.can_read && e.resolved.is_ok() && !cx.sig_busy;
+                let b = ui
+                    .add_enabled(usable, egui::Button::new("Make it last…").small())
+                    .on_hover_text("Find this value in a way that survives restarts")
+                    .on_disabled_hover_text(if cx.sig_busy {
+                        "Another cheat is being made to last; wait for it to finish."
+                    } else {
+                        "Attach to the game, and let the cheat be found first."
+                    });
+                if b.clicked() {
+                    out.push(Action::MakeLasting(i, b.rect));
+                }
             }
         }
         let now = match live_value(e, cx) {
@@ -416,20 +433,25 @@ fn advanced_row(ui: &mut egui::Ui, i: usize, e: &mut GuiEntry, cx: &Ctx, out: &m
         {
             out.push(Action::PointerScan(i));
         }
-        if ui
-            .add_enabled(
-                usable && !cx.sig_busy,
-                egui::Button::new("🧬 AoB signature").small(),
-            )
-            .on_hover_text("Replace the address with a byte pattern search that survives restarts")
-            .on_disabled_hover_text(if cx.sig_busy {
-                "A signature is already being made."
-            } else {
-                "Attach, and let the address resolve first."
-            })
-            .clicked()
-        {
-            out.push(Action::Signature(i));
+        if cx.sig_row == Some(e.id) {
+            signing(ui);
+        } else {
+            let b = ui
+                .add_enabled(
+                    usable && !cx.sig_busy,
+                    egui::Button::new("🧬 AoB signature").small(),
+                )
+                .on_hover_text(
+                    "Replace the address with a byte pattern search that survives restarts",
+                )
+                .on_disabled_hover_text(if cx.sig_busy {
+                    "A signature is already being made."
+                } else {
+                    "Attach, and let the address resolve first."
+                });
+            if b.clicked() {
+                out.push(Action::Signature(i, b.rect));
+            }
         }
         let busy = e.uses_aob() && cx.aob_busy;
         if ui

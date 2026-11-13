@@ -39,6 +39,6 @@ pub use scan::{
     address_hint, parse_aob, parse_range, AddrHint, Confidence, FirstScan, NextScan, ScanProgress,
     Scanner, ANY_TYPES,
 };
-pub use signature::{make_signature, SignatureError};
+pub use signature::{make_signature, make_signature_with, SignatureError};
 pub use source::{LiveSource, MemSource};
 pub use value::{ScanType, ScanValue};
