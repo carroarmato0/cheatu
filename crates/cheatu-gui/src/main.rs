@@ -9,6 +9,8 @@
 mod cheat_table;
 mod file_dialog;
 mod pointer_window;
+#[allow(dead_code)] // used from Task 3 on (screen model, game list)
+mod rpg_detect;
 mod settings;
 mod theme;
 mod wizard;

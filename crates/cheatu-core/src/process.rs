@@ -86,6 +86,15 @@ pub fn list_processes() -> Vec<ProcInfo> {
     out
 }
 
+/// The value of `key` in `pid`'s environment, when it can be read (own
+/// processes, or as root).
+pub fn env_var(pid: i32, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    crate::sys::environ(pid)?
+        .into_iter()
+        .find_map(|kv| kv.strip_prefix(&prefix).map(str::to_owned))
+}
+
 /// Heuristic: does this process belong to a Wine/Proton (Steam Play) game?
 ///
 /// The strongest signals live in the environment (which Steam and Proton fill
