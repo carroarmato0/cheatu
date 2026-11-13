@@ -37,6 +37,7 @@ fn interactive() -> io::Result<()> {
         };
         let line = line?;
         let cmd = line.trim();
+        world::refresh_shown();
         match cmd {
             "" => continue,
             "quit" => return Ok(()),

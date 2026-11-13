@@ -233,8 +233,14 @@ pub fn apply(a: Action) -> Outcome {
         reset();
         outcome = Outcome::Died;
     }
-    GOLD_SHOWN.store(GOLD.load(Relaxed), Relaxed);
+    refresh_shown();
     outcome
+}
+
+/// Copy `gold` into the decoy `gold_shown`, like a game redrawing its HUD.
+/// Called before every command and after every action.
+pub fn refresh_shown() {
+    GOLD_SHOWN.store(GOLD.load(Relaxed), Relaxed);
 }
 
 /// The current values, read from memory.

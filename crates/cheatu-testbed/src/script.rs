@@ -50,6 +50,7 @@ pub fn get(name: &str) -> Option<String> {
 
 /// The reply to one command line, and whether to stop afterwards.
 fn reply(line: &str) -> (String, bool) {
+    world::refresh_shown();
     let mut words = line.split_whitespace();
     let Some(cmd) = words.next() else {
         return ("ERR empty".into(), false);
