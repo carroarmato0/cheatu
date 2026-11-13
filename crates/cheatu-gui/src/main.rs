@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cheat_table;
+mod feedback;
 mod file_dialog;
 mod pointer_window;
 mod rpg_detect;
@@ -17,6 +18,7 @@ mod theme;
 mod wizard;
 mod wizard_ui;
 
+use feedback::Feedback;
 use screen::{RpgPick, Screen, ScreenState};
 use start_screen::{GameRow, ListAction, ListState};
 use theme::{SystemTheme, Theme, ThemePref};
@@ -1348,6 +1350,8 @@ struct CheatuApp {
     /// The "New cheat" wizard, while open.
     /// The game the guided steps' wizard was started for (or followed to
     /// after a restart); attaching to any other game restarts it.
+    /// Confirmations and errors next to the control that caused them.
+    feedback: Feedback,
     wizard_for: Option<i32>,
     wizard: Option<WizardWindow>,
 
@@ -3649,6 +3653,8 @@ impl eframe::App for CheatuApp {
                 });
             }
         }
+
+        self.feedback.show(ctx, Instant::now());
 
         // Keep current values (scanner results, or the RPG Maker snapshot) live.
         if self.scanner.is_some()
