@@ -125,6 +125,7 @@ reference in the **[usage guide](docs/usage.md)**.
 | [RPG Maker mode](docs/rpg-maker.md) | The JavaScript-injection backend for RPG Maker MV/MZ. |
 | [macOS](docs/macos.md) | Building on macOS, privileges, the hardened runtime / SIP, differences from Linux. |
 | [Internals](docs/internals.md) | How the scan engine works, performance, and testing. |
+| [Testbed](docs/testbed.md) | A small target game for learning and testing cheatu safely. |
 | [Building & packaging](docs/packaging.md) | Build from source, the `Makefile`, container packaging, CI/releases. |
 
 ## ⚖️ Safety & scope

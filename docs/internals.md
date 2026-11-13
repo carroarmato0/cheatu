@@ -57,3 +57,14 @@ accessible: `/proc/self/mem` on Linux, the process's own task port on macOS),
 so they validate the full read → scan → narrow → write pipeline without
 needing root. `crates/cheatu-core/tests/macos.rs` adds macOS-only backend
 tests.
+
+`crates/cheatu-testbed` adds tests against a real, separate process: the
+[testbed](testbed.md) game in `--script` mode. They check scans, static
+addresses, pointer chains, `aob(…)`, signatures and saved tables against the
+true addresses the testbed reports, across restarts. On macOS the tests sign
+the testbed with `get-task-allow`, so no root is needed; on Linux a parent may
+read its child under Yama `ptrace_scope` ≤ 1. Without permission to attach a
+test prints `skipped: no permission to attach` and passes; set
+`CHEATU_TESTBED_REQUIRE=1` (CI, Linux) to make that a failure instead.
+`cheatu-core` is built with `opt-level = 3` in the test profile, because these
+tests scan whole processes.
