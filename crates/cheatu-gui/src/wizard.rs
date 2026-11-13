@@ -199,7 +199,7 @@ impl Wizard {
             (Step::MakeLasting, Input::Confirm(true)) => {
                 let Some(addr) = self.chosen else { return };
                 let Some(process) = self.process.clone() else {
-                    self.fail_plain("Cannot tell which process is attached.");
+                    self.fail_plain("Cannot tell which game is attached.");
                     return;
                 };
                 match backend.pointer_scan(addr) {
@@ -318,7 +318,7 @@ impl Wizard {
             },
             Ok(_) => {
                 let Some(process) = self.process.clone() else {
-                    return self.fail_plain("Cannot tell which process is attached.");
+                    return self.fail_plain("Cannot tell which game is attached.");
                 };
                 self.step = Step::WaitRestart { process };
             }

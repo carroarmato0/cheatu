@@ -193,24 +193,21 @@ pub fn wizard_entry(
     entry
         .address
         .validate()
-        .map_err(|e| format!("The wizard's address cannot be saved in a table: {e}."))?;
-    let added = format!(
-        "Added \"{}\" ({}) to the cheat table.",
-        entry.description, entry.address
-    );
+        .map_err(|e| format!("This cheat's address cannot be saved: {e}."))?;
+    let added = format!("Added \"{}\" to My cheats.", entry.description);
     if attached == Some(wizard_pid) {
         return Ok((entry, added));
     }
     entry.frozen = false;
     let now = match attached {
-        Some(pid) => format!("cheatu is attached to pid {pid}"),
-        None => "cheatu is not attached".into(),
+        Some(_) => "cheatu is attached to another run of the game",
+        None => "cheatu is not attached to the game",
     };
     Ok((
         entry,
         format!(
-            "{added} Not frozen: the wizard found it in pid {wizard_pid}, but {now}; \
-             check the address before freezing it."
+            "{added} Not frozen: it was found in an earlier run of the game, but {now}; \
+             check it before freezing it."
         ),
     ))
 }
@@ -273,7 +270,7 @@ pub fn apply_signature(
     let Some(e) = row else {
         return (
             false,
-            "AoB signature discarded: the row or the process changed while it was made.".into(),
+            "AoB signature discarded: the cheat or the game changed while it was made.".into(),
         );
     };
     e.expr_text = expr.to_string();
@@ -535,7 +532,7 @@ frozen = true
         let (other, status) = wizard_entry(e.clone(), 10, Some(20)).unwrap();
         assert!(!other.frozen, "never frozen into another process");
         assert!(
-            status.contains("pid 10") && status.contains("pid 20"),
+            status.contains("Not frozen") && status.contains("another run of the game"),
             "{status}"
         );
         let (detached, _) = wizard_entry(e.clone(), 10, None).unwrap();

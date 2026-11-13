@@ -1427,15 +1427,15 @@ impl CheatuApp {
                 self.needs_elevation = None;
                 self.display.clear();
                 self.result_count = 0;
-                self.status = format!("Attached to pid {pid}.");
+                self.status = format!("Attached to {}.", self.game_title());
                 match LiveSource::open(pid) {
                     Ok(live) => {
                         self.live = Some(live);
                         self.live_error = None;
                     }
                     Err(e) => {
-                        let why = format!("cannot read the process for address expressions: {e}");
-                        self.status = format!("Attached to pid {pid}, but {why}.");
+                        let why = format!("cannot read the game's memory for cheats: {e}");
+                        self.status = format!("Attached to {}, but {why}.", self.game_title());
                         self.live = None;
                         self.live_error = Some(why);
                     }
@@ -1460,7 +1460,7 @@ impl CheatuApp {
                     self.status = "This game needs admin rights.".into();
                 } else {
                     self.needs_elevation = None;
-                    self.status = format!("Failed to attach to pid {pid}: {e}.");
+                    self.status = format!("Could not attach to this game: {e}.");
                 }
             }
         }
@@ -1514,7 +1514,7 @@ impl CheatuApp {
     /// the authority — this only decides whether the button is clickable.
     fn scan_blocker(&self, first: bool) -> Option<&'static str> {
         let Some(scanner) = &self.scanner else {
-            return Some("Attach to a process first.");
+            return Some("Attach to a game first.");
         };
         let text = self.value_text.trim();
         if !first {
@@ -1541,7 +1541,7 @@ impl CheatuApp {
 
     fn start_scan(&mut self, first: bool) {
         let Some(mut scanner) = self.scanner.take() else {
-            self.status = "Attach to a process first.".into();
+            self.status = "Attach to a game first.".into();
             return;
         };
 
@@ -2027,7 +2027,7 @@ impl CheatuApp {
                 self.aob_pending = Some(rx);
                 std::thread::spawn(move || {
                     let result = LiveSource::open(pid)
-                        .map_err(|err| format!("cannot read process: {err}"))
+                        .map_err(|err| format!("cannot read the game: {err}"))
                         .and_then(|src| expr.resolve(&src).map_err(|err| err.to_string()));
                     let _ = tx.send(cheat_table::BgResolve {
                         id,
@@ -2046,7 +2046,7 @@ impl CheatuApp {
     /// scans memory and waits between two reads.
     fn start_signature(&mut self, i: usize) {
         let Some(pid) = self.attached.as_ref().map(|(p, _)| *p) else {
-            self.status = "Attach to a process first.".into();
+            self.status = "Attach to a game first.".into();
             return;
         };
         let Some(e) = self.saved.get(i) else {
@@ -2649,11 +2649,10 @@ impl eframe::App for CheatuApp {
                             }
                             // Follow the guided steps to the restarted game, so
                             // My cheats re-resolve there.
-                            WizardEvent::Reattached(pid) if self.scanning => {
-                                self.status = format!(
-                                    "The game restarted; attach to it once the search is done \
-                                     (pid {pid})."
-                                );
+                            WizardEvent::Reattached(_) if self.scanning => {
+                                self.status = "The game restarted; attach to it from the game \
+                                               list once the search is done."
+                                    .into();
                             }
                             WizardEvent::Reattached(pid) => {
                                 do_attach = Some(pid);
@@ -2869,7 +2868,7 @@ impl eframe::App for CheatuApp {
 
             if !attached {
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Attach to a process to begin scanning.").weak());
+                ui.label(egui::RichText::new("Attach to a game to start searching.").weak());
             }
 
             ui.separator();
@@ -3221,7 +3220,7 @@ impl eframe::App for CheatuApp {
                     ui.heading("cheatu");
                     ui.label(egui::RichText::new(VERSION).weak());
                     ui.add_space(4.0);
-                    ui.label("A memory scanner and cheat tool for games on Linux,\nincluding Wine/Proton and RPG Maker titles.");
+                    ui.label("A memory scanner and cheat tool for games on Linux and macOS,\nincluding Wine/Proton and RPG Maker titles.");
                     ui.add_space(4.0);
                     ui.hyperlink("https://github.com/carroarmato0/cheatu");
                     ui.add_space(4.0);
@@ -3230,7 +3229,6 @@ impl eframe::App for CheatuApp {
 
         // ---- Settings ---------------------------------------------------
         let mut theme = self.theme;
-        let probe_before = self.enable_probe;
         egui::Window::new("Settings")
             .open(&mut self.show_settings)
             .collapsible(false)
@@ -3244,15 +3242,8 @@ impl eframe::App for CheatuApp {
                     ui.selectable_value(&mut theme, ThemePref::Dark, "Dark");
                     ui.selectable_value(&mut theme, ThemePref::Light, "Light");
                 });
-                ui.separator();
-                ui.checkbox(&mut self.enable_probe, "Enable probe (advanced)")
-                    .on_hover_text(
-                        "Adds a 🧪 button to results rows. It writes a test value into \
-                         the game to tell the real value from copies — this can glitch \
-                         or crash the target. Off by default.",
-                    );
             });
-        if theme != self.theme || self.enable_probe != probe_before {
+        if theme != self.theme {
             self.theme = theme;
             if let Some(st) = &self.system_theme {
                 st.set_following(theme == ThemePref::System);
@@ -3432,14 +3423,12 @@ impl eframe::App for CheatuApp {
 
         if let Some((pid, name)) = self.attach_offer.clone() {
             let mut close = false;
-            egui::Window::new("Attach to the table's process?")
+            egui::Window::new("Attach to the table's game?")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(format!(
-                        "This table was made for {name}, which is running as pid {pid}."
-                    ));
+                    ui.label(format!("These cheats are for {name}, which is running."));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Attach").clicked() {
@@ -3543,7 +3532,7 @@ impl eframe::App for CheatuApp {
             self.saved.clear();
             self.table_path = None;
             self.table_process = None;
-            self.status = "Cheat table cleared.".into();
+            self.status = "Removed all cheats.".into();
         }
         // A one-shot write. Freezing writes continuously; this is for the far
         // more common "set it once and see what happens".
