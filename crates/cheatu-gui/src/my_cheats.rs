@@ -457,6 +457,8 @@ fn advanced_row(ui: &mut egui::Ui, i: usize, e: &mut GuiEntry, cx: &Ctx, out: &m
 pub enum Pending {
     Quit,
     Open,
+    /// Relaunch with admin rights (and attach to this game).
+    Elevate(Option<i32>),
 }
 
 /// The answer to "Save changes?".

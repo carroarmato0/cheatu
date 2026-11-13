@@ -17,15 +17,12 @@ const BANNED: &[&str] = &[
     "Cheat table cleared",
 ];
 
-/// Literals that may say "pid" or "process": Advanced-only text and
-/// technical messages. Each is matched as a substring of the literal.
-const ALLOWED: &[&str] = &[
-    // Advanced process list headers.
-    "Process",
-    "PID",
-    // Advanced view's address tools.
-    "Find pointer chains",
-];
+/// Words banned as whole words (the spec's vocabulary: cheats, not entries).
+const BANNED_WORDS: &[&str] = &["entries", "entry"];
+
+/// Literals that may say "pid" or "process", matched exactly: the Advanced
+/// process list's headers.
+const ALLOWED: &[&str] = &["Process", "PID"];
 
 /// Advanced-only windows, where technical words stay (see the spec).
 const ADVANCED_FILES: &[&str] = &["pointer_window.rs"];
@@ -103,12 +100,16 @@ fn without_placeholders(s: &str) -> String {
     out
 }
 
-fn mentions_pid_or_process(s: &str) -> bool {
-    let words: Vec<String> = without_placeholders(s)
+/// The lower-case words of `s`, placeholders removed.
+fn words(s: &str) -> Vec<String> {
+    without_placeholders(s)
         .split(|c: char| !c.is_ascii_alphanumeric())
         .map(str::to_ascii_lowercase)
-        .collect();
-    words
+        .collect()
+}
+
+fn mentions_pid_or_process(s: &str) -> bool {
+    words(s)
         .iter()
         .any(|w| w == "pid" || w == "process" || w == "processes")
 }
@@ -131,10 +132,12 @@ fn gui_text_uses_one_vocabulary() {
                     problems.push(format!("{name}:{line}: \"{b}\" in {lit:?}"));
                 }
             }
-            if !advanced_only
-                && mentions_pid_or_process(&lit)
-                && !ALLOWED.iter().any(|a| lit.contains(a))
-            {
+            for w in BANNED_WORDS {
+                if words(&lit).iter().any(|x| x == w) {
+                    problems.push(format!("{name}:{line}: \"{w}\" in {lit:?}"));
+                }
+            }
+            if !advanced_only && mentions_pid_or_process(&lit) && !ALLOWED.contains(&lit.as_str()) {
                 problems.push(format!("{name}:{line}: pid/process in {lit:?}"));
             }
         }

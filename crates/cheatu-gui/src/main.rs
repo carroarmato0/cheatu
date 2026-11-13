@@ -1371,6 +1371,9 @@ struct CheatuApp {
     /// Quit or open once the "Save changes?" save finishes.
     after_save: Option<Pending>,
     /// The user chose to quit without saving.
+    /// Relaunch elevated (attaching to this game) once "Save changes?" is
+    /// answered.
+    elevate_now: Option<Option<i32>>,
     allow_close: bool,
     feedback: Feedback,
     wizard_for: Option<i32>,
@@ -1397,6 +1400,11 @@ struct CheatuApp {
 
 impl CheatuApp {
     fn attach(&mut self, pid: i32) {
+        self.attach_with(pid, false);
+    }
+
+    /// Attach to `pid`. `restarted`: it is the attached game, restarted.
+    fn attach_with(&mut self, pid: i32, restarted: bool) {
         match Scanner::new(pid) {
             Ok(s) => {
                 let info = self
@@ -1406,12 +1414,15 @@ impl CheatuApp {
                     .cloned()
                     .or_else(|| list_processes().into_iter().find(|p| p.pid == pid));
                 let name = info.as_ref().map_or_else(|| "?".into(), |p| p.name.clone());
-                if self.attached.as_ref().map(|(p, _)| *p) != Some(pid) {
+                let previous = self.attached.as_ref().map(|(p, _)| *p);
+                if previous != Some(pid) && !restarted {
                     self.rpg_pick = RpgPick::Undecided;
                 }
-                self.attached_rpg = info.as_ref().and_then(|p| self.detections.get(p));
+                if !restarted {
+                    self.attached_rpg = info.as_ref().and_then(|p| self.detections.get(p));
+                }
                 // Prefill RPG Maker mode with the game's folder.
-                if self.attached_rpg.is_some() {
+                if self.attached_rpg.is_some() && !restarted {
                     let folder = info.as_ref().and_then(|p| {
                         let prefix =
                             cheatu_core::process::env_var(p.pid, "WINEPREFIX").map(PathBuf::from);
@@ -1443,6 +1454,22 @@ impl CheatuApp {
                 self.live_refreshed = Some(Instant::now());
                 // Any background resolve still running read the old process.
                 self.resolve_generation += 1;
+                // A plain address means nothing in another game (or another
+                // run of it): never keep writing it there.
+                if previous != Some(pid) {
+                    let mut unfrozen = 0;
+                    for e in &mut self.saved {
+                        if e.entry.frozen && !my_cheats::survives_restart(&e.entry.address) {
+                            e.entry.frozen = false;
+                            unfrozen += 1;
+                        }
+                    }
+                    if unfrozen > 0 {
+                        self.status.push_str(&format!(
+                            " Unfroze {unfrozen} cheat(s) that only worked in the previous run."
+                        ));
+                    }
+                }
                 // Addresses of the previous process mean nothing here; drop
                 // them so nothing is written before the entries re-resolve.
                 for e in &mut self.saved {
@@ -1468,6 +1495,12 @@ impl CheatuApp {
 
     /// Let go of the game: back to the game list. Cheats stay in My cheats.
     fn detach(&mut self) {
+        // Stop work on the game being left: a search (its result is dropped
+        // in `poll_scan`) and a probe batch.
+        if let Some(p) = &self.scan_progress {
+            p.cancel();
+        }
+        self.probe_cancel.store(true, Ordering::Relaxed);
         self.attached = None;
         self.scanner = None;
         self.live = None;
@@ -1745,6 +1778,14 @@ impl CheatuApp {
     fn poll_scan(&mut self) {
         let done = self.pending.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(outcome) = done {
+            let attached = self.attached.as_ref().map(|(p, _)| *p);
+            if attached != Some(outcome.scanner.pid()) {
+                // Detached, or another game attached, while it ran.
+                self.scanning = false;
+                self.pending = None;
+                self.scan_progress = None;
+                return;
+            }
             self.status = outcome.message;
             self.scanner = Some(outcome.scanner);
             self.scanning = false;
@@ -2163,7 +2204,7 @@ impl CheatuApp {
         };
         match table::save(&t, &path) {
             Ok(()) => {
-                self.status = format!("Saved {} entries to {}.", t.entries.len(), path.display());
+                self.status = format!("Saved {} cheats to {}.", t.entries.len(), path.display());
                 self.table_process = process;
                 self.table_path = Some(path);
                 self.saved_mark.mark(&self.saved);
@@ -2188,6 +2229,8 @@ impl CheatuApp {
             DialogPurpose::SaveTable => {
                 if let Some(why) = self.save_blocker() {
                     self.status = format!("Not saved: {why}");
+                    // Nothing to quit or open after: no save is coming.
+                    self.after_save = None;
                     return;
                 }
                 let name = self
@@ -2231,7 +2274,7 @@ impl CheatuApp {
         self.table_process = t.process.clone();
         self.attach_offer = None;
         let mut status = format!(
-            "Opened {n} entries from {} — all freezes off.",
+            "Opened {n} cheats from {} — all freezes off.",
             path.display()
         );
         match (&t.process, &self.attached) {
@@ -2270,6 +2313,32 @@ impl CheatuApp {
                 None
             }
             Pending::Open => Some(DialogPurpose::OpenTable),
+            Pending::Elevate(pid) => {
+                self.elevate_now = Some(pid);
+                None
+            }
+        }
+    }
+
+    /// Leave the RPG Maker screen opened without a game.
+    fn back_to_game_list(&mut self) {
+        self.rpg_setup = false;
+    }
+
+    /// Follow the guided steps to the same game after it restarted: keep what
+    /// the user chose for it.
+    fn attach_restarted(&mut self, pid: i32) {
+        self.attach_with(pid, true);
+    }
+
+    /// "Ask for them" relaunches cheatu, which would drop unsaved cheats:
+    /// ask first. Returns whether to relaunch now.
+    fn request_elevate(&mut self, pid: Option<i32>) -> bool {
+        if self.saved_mark.is_dirty(&self.saved) {
+            self.confirm = Some(Confirm::Unsaved(Pending::Elevate(pid)));
+            false
+        } else {
+            true
         }
     }
 
@@ -2335,6 +2404,8 @@ impl eframe::App for CheatuApp {
 
         // Deferred actions, so UI closures never need to call &mut self methods.
         let mut do_attach: Option<i32> = None;
+        // The guided steps followed the game to its restarted process.
+        let mut do_follow: Option<i32> = None;
         let mut do_first = false;
         let mut do_next = false;
         let mut do_reset = false;
@@ -2580,7 +2651,7 @@ impl eframe::App for CheatuApp {
                 if !privilege::is_root() && privilege::elevation_available() {
                     ui.horizontal(|ui| {
                         ui.label("This game needs admin rights.");
-                        if ui.button("Ask for them").clicked() {
+                        if ui.button("Ask for them").clicked() && self.request_elevate(Some(pid)) {
                             do_elevate = true;
                             elevate_for = Some(pid);
                         }
@@ -2590,6 +2661,9 @@ impl eframe::App for CheatuApp {
             }
             match screen {
                 Screen::RpgMaker => {
+                    if self.attached.is_none() && ui.link("← Back to the game list").clicked() {
+                        self.back_to_game_list();
+                    }
                     self.rpg.ui(ui);
                     return;
                 }
@@ -2655,7 +2729,7 @@ impl eframe::App for CheatuApp {
                                     .into();
                             }
                             WizardEvent::Reattached(pid) => {
-                                do_attach = Some(pid);
+                                do_follow = Some(pid);
                                 self.wizard_for = Some(pid);
                             }
                             WizardEvent::ScanManually { unknown } => {
@@ -3470,6 +3544,14 @@ impl eframe::App for CheatuApp {
             self.attach(pid);
             self.show_picker = false;
         }
+        if let Some(pid) = do_follow {
+            self.attach_restarted(pid);
+        }
+        // "Save changes?" answered on the way to relaunching elevated.
+        if let Some(pid) = self.elevate_now.take() {
+            do_elevate = true;
+            elevate_for = pid;
+        }
         if do_elevate {
             if privilege::elevation_available() {
                 self.status = format!("Requesting elevation via {}…", privilege::elevation_tool());
@@ -3651,6 +3733,125 @@ fn read_current(scanner: &Scanner, addr: u64, ty: ScanType) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn own_pid() -> i32 {
+        std::process::id() as i32
+    }
+
+    fn cheat(address: &str, value: &str, frozen: bool) -> GuiEntry {
+        GuiEntry::new(
+            cheatu_core::table::TableEntry {
+                description: "Gold".into(),
+                address: cheatu_core::AddrExpr::parse(address).unwrap(),
+                ty: ScanType::I32,
+                value: value.into(),
+                frozen,
+            },
+            false,
+        )
+    }
+
+    /// C1: the RPG Maker screen reached without a game must lead back.
+    #[test]
+    fn back_from_rpg_setup_returns_to_game_list() {
+        let mut app = CheatuApp {
+            rpg_setup: true,
+            ..Default::default()
+        };
+        assert_eq!(screen::screen(&app.screen_state()), Screen::RpgMaker);
+        app.back_to_game_list();
+        assert_eq!(screen::screen(&app.screen_state()), Screen::ChooseGame);
+    }
+
+    /// I1: following a restarted RPG Maker game keeps the user's choice.
+    #[test]
+    fn following_a_restart_keeps_the_rpg_choice() {
+        let mut app = CheatuApp {
+            attached: Some((1, "Game".into())),
+            rpg_pick: RpgPick::Memory,
+            attached_rpg: Some(cheatu_inject::Engine::RpgMakerMZ),
+            ..Default::default()
+        };
+        app.attach_restarted(own_pid());
+        assert_eq!(app.rpg_pick, RpgPick::Memory);
+        assert_eq!(app.attached_rpg, Some(cheatu_inject::Engine::RpgMakerMZ));
+        assert_eq!(screen::screen(&app.screen_state()), Screen::Guided);
+    }
+
+    /// I2: a search that finishes after Detach must not bring the old game back.
+    #[test]
+    fn stale_scan_result_is_dropped() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = CheatuApp {
+            pending: Some(rx),
+            scanning: true,
+            ..Default::default()
+        };
+        tx.send(ScanOutcome {
+            scanner: Scanner::new(own_pid()).unwrap(),
+            message: "1 result.".into(),
+        })
+        .unwrap();
+        app.poll_scan();
+        assert!(app.scanner.is_none(), "not attached to that game any more");
+        assert!(!app.scanning);
+    }
+
+    /// I2: Detach stops a probe batch.
+    #[test]
+    fn detach_cancels_a_probe_batch() {
+        let mut app = CheatuApp {
+            attached: Some((own_pid(), "x".into())),
+            ..Default::default()
+        };
+        app.detach();
+        assert!(app.probe_cancel.load(Ordering::Relaxed));
+    }
+
+    /// I3: a save that cannot start must not leave Quit armed for later.
+    #[test]
+    fn blocked_save_dialog_forgets_pending_quit() {
+        let mut app = CheatuApp {
+            saved: vec![cheat("\"game\"+0x10", "not a number", false)],
+            after_save: Some(Pending::Quit),
+            ..Default::default()
+        };
+        app.open_file_dialog(DialogPurpose::SaveTable);
+        assert!(app.file_dialog.is_none());
+        assert_eq!(app.after_save, None);
+    }
+
+    /// I4: "Ask for them" relaunches cheatu; unsaved cheats are asked about.
+    #[test]
+    fn elevating_with_unsaved_cheats_asks_first() {
+        let mut app = CheatuApp {
+            saved: vec![cheat("\"game\"+0x10", "1", false)],
+            ..Default::default()
+        };
+        assert!(!app.request_elevate(Some(5)));
+        assert!(matches!(
+            app.confirm,
+            Some(Confirm::Unsaved(Pending::Elevate(Some(5))))
+        ));
+        let mut clean = CheatuApp::default();
+        assert!(clean.request_elevate(Some(5)));
+    }
+
+    /// I5: a plain address means nothing in another game: never freeze into it.
+    #[test]
+    fn attaching_unfreezes_session_only_cheats() {
+        let mut app = CheatuApp {
+            attached: Some((1, "old".into())),
+            saved: vec![
+                cheat("0x1000", "1", true),
+                cheat("\"game\"+0x10", "1", true),
+            ],
+            ..Default::default()
+        };
+        app.attach(own_pid());
+        assert!(!app.saved[0].entry.frozen, "session only: unfrozen");
+        assert!(app.saved[1].entry.frozen, "keeps working after a restart");
+    }
 
     fn addrs(app: &CheatuApp) -> Vec<u64> {
         app.display.iter().map(|d| d.addr).collect()

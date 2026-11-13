@@ -131,7 +131,10 @@ Each cheat is one row:
 
 Quitting or opening another table with unsaved changes asks *Save changes to
 <file>?* (or *Save your cheats?* if it was never saved) with **Save**,
-**Don't save** and **Cancel**. **Remove…** and **Remove all…** ask first.
+**Don't save** and **Cancel**, and so does **Ask for them** (it restarts
+cheatu with admin rights). **Remove…** and **Remove all…** ask first.
+On macOS, quitting with **⌘Q** or the app menu's *Quit* does **not** ask yet:
+close the window instead, or save first.
 
 ### Advanced view
 
