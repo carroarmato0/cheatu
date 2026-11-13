@@ -696,6 +696,7 @@ dependencies = [
  "cheatu-inject",
  "eframe",
  "egui_extras",
+ "libc",
  "serde_json",
 ]
 

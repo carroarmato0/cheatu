@@ -9,8 +9,11 @@
 mod cheat_table;
 mod file_dialog;
 mod pointer_window;
+mod theme;
 mod wizard;
 mod wizard_ui;
+
+use theme::{SystemTheme, Theme, ThemePref};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -138,10 +141,13 @@ fn main() -> eframe::Result<()> {
             install_fonts(&cc.egui_ctx);
             configure_style(&cc.egui_ctx);
             let theme = load_theme();
-            apply_theme(&cc.egui_ctx, theme);
+            let ctx = cc.egui_ctx.clone();
+            let system_theme =
+                SystemTheme::start(theme == ThemePref::System, move || ctx.request_repaint());
             Ok(Box::new(CheatuApp {
                 pause_while_scanning: true,
                 theme,
+                system_theme: Some(system_theme),
                 // Set when we were relaunched elevated for a specific target;
                 // attached on the first frame so the user lands back on scanning.
                 pending_attach: privilege::attach_target(),
@@ -223,13 +229,6 @@ fn configure_style(ctx: &eframe::egui::Context) {
     ctx.set_style(style);
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Default)]
-enum Theme {
-    #[default]
-    Dark,
-    Light,
-}
-
 fn apply_theme(ctx: &eframe::egui::Context, theme: Theme) {
     use eframe::egui::{Color32, Visuals};
     let mut v = match theme {
@@ -295,30 +294,24 @@ fn config_path() -> PathBuf {
     home_dir().join("Library/Application Support/cheatu/config.json")
 }
 
-fn load_theme() -> Theme {
-    let Ok(text) = std::fs::read_to_string(config_path()) else {
-        return Theme::default();
-    };
+fn load_theme() -> ThemePref {
+    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
     let theme = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| v.get("theme")?.as_str().map(str::to_owned));
-    match theme.as_deref() {
-        Some("light") => Theme::Light,
-        _ => Theme::Dark,
-    }
+    ThemePref::from_name(theme.as_deref())
 }
 
 /// Best-effort: a lost theme preference is not worth an error dialog.
-fn save_theme(theme: Theme) {
+fn save_theme(theme: ThemePref) {
     let path = config_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let name = match theme {
-        Theme::Dark => "dark",
-        Theme::Light => "light",
-    };
-    let _ = std::fs::write(path, serde_json::json!({ "theme": name }).to_string());
+    let _ = std::fs::write(
+        path,
+        serde_json::json!({ "theme": theme.name() }).to_string(),
+    );
 }
 
 /// Find a CJK font: an explicit override, then fontconfig, then known paths.
@@ -1393,7 +1386,11 @@ struct CheatuApp {
     freeze_started: bool,
 
     // Preferences & modals.
-    theme: Theme,
+    theme: ThemePref,
+    /// The desktop's theme, followed while `theme` is `System`.
+    system_theme: Option<SystemTheme>,
+    /// The theme currently applied to the context.
+    applied_theme: Option<Theme>,
     show_about: bool,
     show_settings: bool,
     /// Opt-in to the destructive auto-probe (writes to live target memory).
@@ -2210,6 +2207,19 @@ impl CheatuApp {
     }
 }
 
+impl CheatuApp {
+    /// Apply the chosen theme, or the desktop's while following it, when it
+    /// differs from what is shown.
+    fn apply_current_theme(&mut self, ctx: &eframe::egui::Context) {
+        let system = self.system_theme.as_ref().and_then(SystemTheme::get);
+        let want = self.theme.resolve(system);
+        if self.applied_theme != Some(want) {
+            apply_theme(ctx, want);
+            self.applied_theme = Some(want);
+        }
+    }
+}
+
 impl eframe::App for CheatuApp {
     /// Never leave the target stopped: a scan, pointer scan or wizard scan
     /// may have it suspended, and exiting kills the worker before its guard
@@ -2227,6 +2237,7 @@ impl eframe::App for CheatuApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         use eframe::egui;
 
+        self.apply_current_theme(ctx);
         self.ensure_freeze_thread();
         self.poll_scan();
         self.poll_probe();
@@ -3394,8 +3405,10 @@ impl eframe::App for CheatuApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Theme:");
-                    ui.selectable_value(&mut theme, Theme::Dark, "Dark");
-                    ui.selectable_value(&mut theme, Theme::Light, "Light");
+                    ui.selectable_value(&mut theme, ThemePref::System, "System")
+                        .on_hover_text("Follow the desktop's light or dark setting");
+                    ui.selectable_value(&mut theme, ThemePref::Dark, "Dark");
+                    ui.selectable_value(&mut theme, ThemePref::Light, "Light");
                 });
                 ui.separator();
                 ui.checkbox(&mut self.enable_probe, "Enable probe (advanced)")
@@ -3407,7 +3420,9 @@ impl eframe::App for CheatuApp {
             });
         if theme != self.theme {
             self.theme = theme;
-            apply_theme(ctx, theme);
+            if let Some(st) = &self.system_theme {
+                st.set_following(theme == ThemePref::System);
+            }
             save_theme(theme);
         }
 

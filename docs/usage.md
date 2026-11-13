@@ -109,6 +109,13 @@ Not sure which address is the real one, or want the cheat to keep working after
 the game restarts? **New cheat…** in the header opens the
 [cheat wizard](#cheat-wizard), which does all of the above step by step.
 
+**⚙ Settings → Theme** picks **System** (the default), **Dark** or **Light**.
+System follows your desktop's light or dark setting and switches within a
+couple of seconds when you change it, also while cheatu runs elevated. On
+Linux it reads the desktop's `org.freedesktop.appearance color-scheme` (via
+`gdbus`), falling back to GNOME's `gsettings`; on macOS, the system
+appearance. When neither can be read, it is dark.
+
 ## Cheat tables
 
 The cheat table can be saved to a file and opened again later, or shared with
