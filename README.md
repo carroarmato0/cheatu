@@ -35,22 +35,23 @@ a native GUI — plus a dedicated, stable backend for RPG Maker MV/MZ games.
   runs identically on **Wayland and Xorg**, under **KDE, GNOME, and standalone
   window managers**.
 - ⌨️ **scanmem-style CLI** — a scriptable REPL for people who live in a terminal.
-- 📋 **Cheat tables, pointer scanner and wizard** — save and share cheats as
-  TOML with addresses that survive restarts (module offsets, pointer chains,
-  byte patterns); a guided "New cheat…" wizard does the whole flow for you.
+- 📋 **Cheat tables, pointer scanner and guided steps** — save and share cheats
+  as TOML with addresses that survive restarts (module offsets, pointer chains,
+  byte patterns); the guided steps do the whole flow for you, and an
+  **Advanced** view gives you the full scanner.
 - ❓ **"Any" type search** — don't know if it's an int, float, or double? Scan
   every common width at once; each hit reports what it really is.
-- 🎮 **Steam Play / Proton aware** — the process picker highlights Wine/Proton
-  processes, sorts by memory, and labels NW.js/Electron sub-processes by role so
-  you attach to the right one.
+- 🎮 **Steam Play / Proton aware** — the game list tags Wine/Proton games and
+  folds NW.js/Electron helper processes into one row, so you attach to the
+  right one.
 - 🕹️ **RPG Maker mode (stable)** — instead of fragile heap scanning, cheatu
   injects a game-agnostic JavaScript agent that edits gold, party stats, items,
   variables and switches through the engine's own data model. Works under
   Proton.
 - 🈶 **CJK fonts** — Japanese/Chinese/Korean names render properly, no tofu
   boxes.
-- 🔐 **One-click elevation** — relaunches itself through `pkexec` (polkit) when
-  it needs `CAP_SYS_PTRACE`.
+- 🔐 **One-click elevation** — when a game needs admin rights, **Ask for them**
+  relaunches cheatu through `pkexec` (polkit) for `CAP_SYS_PTRACE`.
 - 📦 **Packaged everywhere** — `.deb`, `.rpm`, AUR, AppImage, Flatpak, and Snap.
 
 ## 📦 Installation
@@ -85,15 +86,16 @@ hardened-runtime caveat.
 
 ### GUI
 
-Launch **cheatu-gui** (from your app menu or the terminal). Pick a target with
-**Select process…**, choose a **Value type**, enter the value, and **First
-scan**. Change the value in-game, run **Next scan** to narrow, then add a
-survivor to the **Cheat table** to **Set** or **Freeze** it.
+Launch **cheatu-gui** (from your app menu or the terminal). Pick your game on
+the start screen and **Attach**, then follow the guided steps: enter the value
+you see, change it in-game, **Narrow down**, and **Add to My cheats** to
+**Set** or **❄ Freeze** it. Want the full scanner? Tick **Advanced** in the
+header.
 
-Playing an RPG Maker MV/MZ game? Switch the header to **RPG Maker (JS)**,
-**Browse…** to the game folder, **Install agent**, and get a live panel for
-gold, party stats, items, variables and switches — see the
-**[RPG Maker guide](docs/rpg-maker.md)**.
+Playing an RPG Maker MV/MZ game? Attach to it and choose **RPG Maker mode**
+(or use **RPG Maker game not running yet? Set it up…** on the start screen),
+**Install agent**, and get a live panel for gold, party stats, items,
+variables and switches — see the **[RPG Maker guide](docs/rpg-maker.md)**.
 
 ### CLI
 
@@ -112,8 +114,9 @@ Don't know the type? `type any` searches every width at once. Full command
 reference in the **[usage guide](docs/usage.md)**.
 
 > **Heads-up:** reading another process's memory needs **root** or
-> **`CAP_SYS_PTRACE`**. cheatu can elevate itself via `pkexec` — click
-> *Request root access* in the GUI, or type `sudo` in the CLI. On **macOS**
+> **`CAP_SYS_PTRACE`**. cheatu can elevate itself via `pkexec` — press
+> **Ask for them** when the GUI says the game needs admin rights, or type `sudo`
+> in the CLI. On **macOS**
 > it needs root (the GUI shows the admin prompt; run the CLI as `sudo cheatu`),
 > and hardened-runtime apps stay off-limits — see the [macOS guide](docs/macos.md).
 
@@ -121,7 +124,7 @@ reference in the **[usage guide](docs/usage.md)**.
 
 | Guide | What's inside |
 |-------|---------------|
-| [Usage](docs/usage.md) | Privileges, the CLI REPL, the GUI scanner, finding Proton games, CJK fonts. |
+| [Usage](docs/usage.md) | Privileges, the CLI REPL, the GUI, finding Proton games, CJK fonts. |
 | [RPG Maker mode](docs/rpg-maker.md) | The JavaScript-injection backend for RPG Maker MV/MZ. |
 | [macOS](docs/macos.md) | Building on macOS, privileges, the hardened runtime / SIP, differences from Linux. |
 | [Internals](docs/internals.md) | How the scan engine works, performance, and testing. |

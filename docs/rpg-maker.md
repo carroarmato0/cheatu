@@ -29,7 +29,11 @@ a game is running an older plugin and offer to update it.
 
 ## GUI
 
-Switch the header to **RPG Maker (JS)**:
+Attach to the game from the start screen: cheatu detects RPG Maker MV/MZ games
+and offers **RPG Maker mode** (recommended; the game folder is prefilled) or
+**Memory scanner**. Choose **Use RPG Maker mode**. You can switch later from
+the game name's **⏷** menu in the header. If the game isn't running yet, use
+**RPG Maker game not running yet? Set it up…** on the start screen instead.
 
 1. **Scan Steam** or **Browse…** to a game folder (loose non-Steam games work
    too; symlinked Steam copies are de-duplicated to the real path).

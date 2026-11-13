@@ -30,9 +30,10 @@ instance too; a bare `cheatu-gui` running as root gets the generic "exec" icon.
 macOS only hands out another process's memory (its Mach *task port*) to
 **root**. cheatu can always inspect itself, but to scan a game:
 
-- **GUI:** click **Request root access** (or **Elevate & attach** after a
-  failed attach). macOS shows its administrator password prompt, and an
-  elevated cheatu replaces the current window and re-attaches to the target.
+- **GUI:** when an attach is refused, the main area says *This game needs
+  admin rights.* Press **Ask for them**. macOS shows its administrator
+  password prompt, and an elevated cheatu replaces the current window and
+  re-attaches to the target.
 - **CLI:** start it as `sudo cheatu`. Typing `sudo` in the REPL explains this
   instead of relaunching, because the elevated copy would be detached from
   your terminal.

@@ -63,21 +63,23 @@ found.
 ## Exercises
 
 Start the testbed in one terminal and cheatu-gui next to it, and attach to
-`cheatu-testbed`.
+`cheatu-testbed` from the start screen. Exercises 1 to 5 need **Advanced**
+ticked in the header; exercise 6 uses it off.
 
 ### 1. Find the gold, and the decoy
 
-1. Scan for `100` as **4 Bytes**.
-2. `fight` in the testbed (gold becomes 115), then a next scan for `115`.
+1. Search for `100` as **4 Bytes** (**🔍 Search**).
+2. `fight` in the testbed (gold becomes 115), then **Narrow down** for `115`.
 3. A couple of rounds of `buy`/`fight` leave **two** results. `addrs` shows
    they are `gold` and `gold_shown`.
-4. Set the second one to 999 and type `status`: it is back to the real gold.
-   Set the first one: that change sticks. The real value is the one the game
+4. Add both with **+**, set the second one to 999 in the cheat table and type
+   `status`: it is back to the real gold. Set the first one: that change
+   sticks. The real value is the one the game
    computes with; a display copy is overwritten from it.
 
 ### 2. Freeze HP
 
-Find HP (100 → `fight` → 93), add it to the cheat table and freeze it. `fight`
+Find HP (100 → `fight` → 93), add it to the cheat table with **+** and freeze it (**❄**). `fight`
 as often as you like: HP stays put. Now type `next` and `fight` again: the
 frozen row no longer helps, because HP moved to new memory (the old address
 stays allocated but unused, so the freeze is harmless). Exercise 4 fixes
@@ -85,14 +87,14 @@ that.
 
 ### 3. Survive a restart with a table
 
-Add Gold and Kills to the table — both static, so cheatu stores them as
+Add Gold and Kills to the cheat table — both static, so cheatu stores them as
 `"cheatu-testbed"+0x…`. Save the table (💾 Save), `quit` the testbed, start it
 again, attach, and open the table (📂 Open…). Both rows find their values in
 the new process.
 
 ### 4. Pointer-scan HP
 
-1. With HP in the table, open its row menu (hover text "More: AoB signature, pointer scan") and choose **Pointer scan…**, then **Scan**.
+1. With HP in the table, click **🎯 Pointer scan…** on its row, then **Scan**.
 2. Quit and restart the testbed, attach, and filter the chains by HP's new
    address with **Filter with new address** (from `addrs`, or found with a
    quick scan). One or more chains
@@ -102,17 +104,17 @@ the new process.
 
 ### 5. Signatures
 
-From the Ammo row's menu choose **Make AoB signature**. cheatu finds a unique byte
+On the Ammo row click **🧬 AoB signature**. cheatu finds a unique byte
 pattern around it and stores `aob("…")`; it survives restarts and `next`.
 For the marker, type `marker` in the testbed: it prints a ready-made
 `aob("43 48 …")` address. Add it to the table as an address, or search the
 bytes between the quotes as an Array of Bytes.
 
-### 6. The wizard
+### 6. The guided steps
 
-Click **New cheat…** and follow the steps for Gold: the wizard scans, narrows
-down to the real value (spotting the decoy), and offers to make it last
-across restarts before you save.
+With **Advanced** off, attach and follow the steps for Gold: cheatu scans,
+narrows down to the real value (spotting the decoy), and offers to make it
+last across restarts before you **Add to My cheats**.
 
 ## In the tests
 
