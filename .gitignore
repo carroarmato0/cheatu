@@ -34,3 +34,6 @@ Thumbs.db
 # Note: Cargo.lock is intentionally committed — this workspace ships
 # binaries (applications), so we pin exact dependency versions.
 .tokensave
+
+# Local work notes and mockups (superpowers)
+/.superpowers/
