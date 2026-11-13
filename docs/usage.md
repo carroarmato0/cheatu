@@ -149,7 +149,11 @@ Tick **Advanced** for the memory scanner and the full cheat table.
    results table's **Type** column tells you what each hit really is. *Unknown
    initial value* works with **Any** too — it keeps every address as every type,
    so it needs a lot of memory and aborts with a message if the results wouldn't
-   fit; pick a single type if that happens. **Signed** switches integer
+   fit; pick a single type if that happens. Each place is listed once per
+   width: an integer is searched as signed, and as unsigned only when the
+   value (or range) is above the signed maximum — so a counter that later
+   grows past 2,147,483,647 drops out of an **Any** search; search it again as
+   **4 Bytes** without **Signed**. **Signed** switches integer
    signedness; **Pause the game while searching** freezes the target so values
    can't move.
 2. Let the value change in-game, pick a **Compare** comparison

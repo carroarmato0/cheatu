@@ -149,6 +149,52 @@ pub enum FirstScan {
 /// Parse an inclusive range such as `"6400000..6500000"`.
 ///
 /// Returns `None` when the text isn't a range or either end isn't a number, so
+/// Drop the unsigned twin of a signed integer type the scan also searches,
+/// when the signed one already covers the value: both read the same bytes,
+/// so the same place would be listed twice under the same width ("4 Bytes").
+/// The unsigned type stays when only it can hold the value (above the signed
+/// maximum), and when it is searched alone.
+fn without_sign_twins(scan: FirstScan) -> FirstScan {
+    // `types` minus each unsigned type whose signed twin is in `types` and
+    // `signed_covers` it.
+    fn keep(types: Vec<ScanType>, signed_covers: impl Fn(ScanType) -> bool) -> Vec<ScanType> {
+        let twins: Vec<ScanType> = types
+            .iter()
+            .copied()
+            .filter(|t| {
+                !t.is_float()
+                    && !t.is_signed()
+                    && types.contains(&t.with_sign(true))
+                    && signed_covers(t.with_sign(true))
+            })
+            .collect();
+        types.into_iter().filter(|t| !twins.contains(t)).collect()
+    }
+    match scan {
+        FirstScan::Value { value, types } => {
+            let types = keep(types, |signed| signed.parse(&value).is_some());
+            FirstScan::Value { value, types }
+        }
+        FirstScan::Range { low, high, types } => {
+            let types = keep(types, |signed| high <= signed_max(signed));
+            FirstScan::Range { low, high, types }
+        }
+        // Every slot is kept whatever it holds: the twin adds nothing.
+        FirstScan::Unknown(types) => FirstScan::Unknown(keep(types, |_| true)),
+        pattern @ FirstScan::Pattern(_) => pattern,
+    }
+}
+
+/// The largest value a signed integer type holds.
+fn signed_max(t: ScanType) -> f64 {
+    match t {
+        ScanType::I8 => i8::MAX as f64,
+        ScanType::I16 => i16::MAX as f64,
+        ScanType::I32 => i32::MAX as f64,
+        _ => i64::MAX as f64,
+    }
+}
+
 /// callers can fall back to treating the input as a single value.
 pub fn parse_range(s: &str) -> Option<(f64, f64)> {
     let (low, high) = s.split_once("..")?;
@@ -384,6 +430,7 @@ impl Scanner {
     /// threads sharing one memory handle (`pread` is thread-safe), which makes
     /// scanning a multi-gigabyte process markedly faster on multi-core CPUs.
     pub fn first_scan(&mut self, scan: FirstScan) -> io::Result<()> {
+        let scan = without_sign_twins(scan);
         let regions = read_maps(self.pid())?;
         let scannable: Vec<MemoryRegion> =
             regions.into_iter().filter(|r| r.is_scannable()).collect();
@@ -949,6 +996,72 @@ fn candidate_cap() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn types_of(scan: FirstScan) -> Vec<ScanType> {
+        match scan {
+            FirstScan::Value { types, .. } | FirstScan::Range { types, .. } => types,
+            FirstScan::Unknown(types) => types,
+            FirstScan::Pattern(_) => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn any_value_scan_lists_each_width_once() {
+        let any = |v: &str| {
+            types_of(without_sign_twins(FirstScan::Value {
+                value: v.into(),
+                types: ANY_TYPES.to_vec(),
+            }))
+        };
+        use ScanType::*;
+        assert_eq!(any("100"), vec![I32, I64, F32, F64]);
+        assert_eq!(any("-5"), vec![I32, I64, F32, F64]);
+        // Above i32::MAX only u32 holds it as 4 bytes, so u32 stays; i32
+        // stays listed but cannot parse the value, so it matches nothing.
+        assert_eq!(any("3000000000"), vec![I32, U32, I64, F32, F64]);
+        assert!(I32.parse("3000000000").is_none());
+        assert_eq!(
+            any("10000000000000000000"),
+            vec![I32, U32, I64, U64, F32, F64]
+        );
+        assert!(I64.parse("10000000000000000000").is_none());
+    }
+
+    #[test]
+    fn any_unknown_scan_has_no_unsigned_twins() {
+        use ScanType::*;
+        let t = types_of(without_sign_twins(FirstScan::Unknown(ANY_TYPES.to_vec())));
+        assert_eq!(t, vec![I32, I64, F32, F64]);
+    }
+
+    #[test]
+    fn any_range_keeps_unsigned_only_above_signed_max() {
+        use ScanType::*;
+        let r = |low: f64, high: f64| {
+            types_of(without_sign_twins(FirstScan::Range {
+                low,
+                high,
+                types: ANY_TYPES.to_vec(),
+            }))
+        };
+        assert_eq!(r(6_400_000.0, 6_500_000.0), vec![I32, I64, F32, F64]);
+        assert_eq!(
+            r(2_000_000_000.0, 3_000_000_000.0),
+            vec![I32, U32, I64, F32, F64]
+        );
+    }
+
+    #[test]
+    fn a_single_chosen_type_is_kept() {
+        use ScanType::*;
+        let t = types_of(without_sign_twins(FirstScan::Value {
+            value: "100".into(),
+            types: vec![U32],
+        }));
+        assert_eq!(t, vec![U32]);
+        let t = types_of(without_sign_twins(FirstScan::Unknown(vec![U16])));
+        assert_eq!(t, vec![U16]);
+    }
 
     /// An unknown-value scan over several types stores each address once per
     /// type, so the same slot is tracked as both an integer and a float.
