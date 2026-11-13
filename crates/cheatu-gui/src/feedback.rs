@@ -51,6 +51,7 @@ impl Feedback {
     }
 
     /// Notes still on screen at `now`.
+    #[cfg(test)]
     pub fn live(&self, now: Instant) -> usize {
         self.notes.iter().filter(|n| n.live(now)).count()
     }
