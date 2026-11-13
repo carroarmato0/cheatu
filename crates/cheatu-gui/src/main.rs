@@ -20,6 +20,7 @@ mod wizard;
 mod wizard_ui;
 
 use feedback::Feedback;
+use my_cheats::{Answer, CloseAction, Pending};
 use screen::{RpgPick, Screen, ScreenState};
 use start_screen::{GameRow, ListAction, ListState};
 use theme::{SystemTheme, Theme, ThemePref};
@@ -371,6 +372,15 @@ impl NextMode {
             NextMode::Exact | NextMode::NotEqual | NextMode::Greater | NextMode::Less
         )
     }
+}
+
+/// A question in a small window, waiting for an answer.
+#[derive(Copy, Clone)]
+enum Confirm {
+    Unsaved(Pending),
+    /// Remove the cheat with this id.
+    Remove(u64),
+    ClearAll,
 }
 
 /// How often the game list refreshes while it is on screen.
@@ -1356,6 +1366,12 @@ struct CheatuApp {
     cheats_ui: my_cheats::PanelState,
     /// My cheats as last saved or opened, for the unsaved marker.
     saved_mark: my_cheats::Saved,
+    /// A question waiting for an answer (unsaved changes, a removal).
+    confirm: Option<Confirm>,
+    /// Quit or open once the "Save changes?" save finishes.
+    after_save: Option<Pending>,
+    /// The user chose to quit without saving.
+    allow_close: bool,
     feedback: Feedback,
     wizard_for: Option<i32>,
     wizard: Option<WizardWindow>,
@@ -2244,6 +2260,19 @@ impl CheatuApp {
 }
 
 impl CheatuApp {
+    /// Carry out what "Save changes?" was asked for. Returns the file dialog
+    /// to open, if any.
+    fn go_ahead(&mut self, ctx: &eframe::egui::Context, p: Pending) -> Option<DialogPurpose> {
+        match p {
+            Pending::Quit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                None
+            }
+            Pending::Open => Some(DialogPurpose::OpenTable),
+        }
+    }
+
     /// The preferences as they are now, for saving.
     fn settings(&self) -> settings::Settings {
         settings::Settings {
@@ -2283,6 +2312,15 @@ impl eframe::App for CheatuApp {
         use eframe::egui;
 
         self.apply_current_theme(ctx);
+
+        // Quitting with unsaved cheats asks first.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            let dirty = self.saved_mark.is_dirty(&self.saved);
+            if my_cheats::close_decision(dirty, None) == CloseAction::Ask {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.confirm = Some(Confirm::Unsaved(Pending::Quit));
+            }
+        }
         self.ensure_freeze_thread();
         self.poll_scan();
         self.poll_probe();
@@ -2309,6 +2347,8 @@ impl eframe::App for CheatuApp {
         let mut remove_from_table: Vec<usize> = Vec::new();
         let mut clear_table = false;
         let mut open_dialog: Option<DialogPurpose> = None;
+        // Open was asked for; it may first need "Save changes?".
+        let mut want_open = false;
         // An address expression was changed this frame.
         let mut expr_edited = false;
         let mut quick_save = false;
@@ -2495,12 +2535,16 @@ impl eframe::App for CheatuApp {
         for action in cheat_actions {
             use my_cheats::Action;
             match action {
-                Action::Open => open_dialog = Some(DialogPurpose::OpenTable),
+                Action::Open => want_open = true,
                 Action::Save => quick_save = true,
                 Action::SaveAs => open_dialog = Some(DialogPurpose::SaveTable),
-                Action::ClearAll => clear_table = true,
+                Action::ClearAll => self.confirm = Some(Confirm::ClearAll),
                 Action::Set(i, at) => do_set = Some((i, at)),
-                Action::Remove(i) => remove_from_table.push(i),
+                Action::Remove(i) => {
+                    if let Some(e) = self.saved.get(i) {
+                        self.confirm = Some(Confirm::Remove(e.id));
+                    }
+                }
                 Action::PointerScan(i) => do_ptr_scan = Some(i),
                 Action::Signature(i) => do_signature = Some(i),
                 Action::MakeLasting(i) => {
@@ -2566,7 +2610,7 @@ impl eframe::App for CheatuApp {
                     ) {
                         Some(ListAction::Attach(pid)) => do_attach = Some(pid),
                         Some(ListAction::Refresh) => do_refresh_procs = true,
-                        Some(ListAction::OpenTable) => open_dialog = Some(DialogPurpose::OpenTable),
+                        Some(ListAction::OpenTable) => want_open = true,
                         Some(ListAction::RpgSetup) => self.rpg_setup = true,
                         None => {}
                     }
@@ -3225,6 +3269,110 @@ impl eframe::App for CheatuApp {
         }
 
         // ---- Cheat table file dialog and attach offer --------------------
+        // ---- Confirmations ----------------------------------------------
+        if want_open {
+            if self.saved_mark.is_dirty(&self.saved) {
+                self.confirm = Some(Confirm::Unsaved(Pending::Open));
+            } else {
+                open_dialog = Some(DialogPurpose::OpenTable);
+            }
+        }
+        if let Some(c) = self.confirm {
+            let file = self
+                .table_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned());
+            let mut answer: Option<Answer> = None;
+            let mut yes = false;
+            let mut no = false;
+            let title = match c {
+                Confirm::Unsaved(_) => "Unsaved changes",
+                Confirm::Remove(_) | Confirm::ClearAll => "Remove",
+            };
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| match c {
+                    Confirm::Unsaved(_) => {
+                        ui.label(match &file {
+                            Some(f) => format!("Save changes to {f}?"),
+                            None => "Save your cheats?".to_string(),
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                answer = Some(Answer::Save);
+                            }
+                            if ui.button("Don't save").clicked() {
+                                answer = Some(Answer::DontSave);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                answer = Some(Answer::Cancel);
+                            }
+                        });
+                    }
+                    Confirm::Remove(id) => {
+                        let name = self
+                            .saved
+                            .iter()
+                            .find(|e| e.id == id)
+                            .map_or("this cheat", |e| e.entry.description.as_str());
+                        ui.label(format!("Remove \"{name}\"?"));
+                        ui.horizontal(|ui| {
+                            yes = ui.button("Remove").clicked();
+                            no = ui.button("Cancel").clicked();
+                        });
+                    }
+                    Confirm::ClearAll => {
+                        ui.label(format!("Remove all {} cheats?", self.saved.len()));
+                        ui.horizontal(|ui| {
+                            yes = ui.button("Remove all").clicked();
+                            no = ui.button("Cancel").clicked();
+                        });
+                    }
+                });
+            match c {
+                Confirm::Unsaved(pending) => {
+                    if let Some(a) = answer {
+                        self.confirm = None;
+                        match my_cheats::close_decision(true, Some(a)) {
+                            CloseAction::Stay | CloseAction::Ask => {}
+                            CloseAction::Close => {
+                                open_dialog = open_dialog.or(self.go_ahead(ctx, pending));
+                            }
+                            CloseAction::SaveThenClose => match self.table_path.clone() {
+                                Some(path) => {
+                                    self.save_table(path);
+                                    // A failed save keeps everything open; the
+                                    // status bar says why.
+                                    if !self.saved_mark.is_dirty(&self.saved) {
+                                        open_dialog = open_dialog.or(self.go_ahead(ctx, pending));
+                                    }
+                                }
+                                None => {
+                                    self.after_save = Some(pending);
+                                    open_dialog = Some(DialogPurpose::SaveTable);
+                                }
+                            },
+                        }
+                    }
+                }
+                Confirm::Remove(id) if yes => {
+                    self.confirm = None;
+                    if let Some(i) = self.saved.iter().position(|e| e.id == id) {
+                        remove_from_table.push(i);
+                    }
+                }
+                Confirm::ClearAll if yes => {
+                    self.confirm = None;
+                    clear_table = true;
+                }
+                _ if no => self.confirm = None,
+                _ => {}
+            }
+        }
+
         if quick_save {
             match self.table_path.clone() {
                 Some(path) => self.save_table(path),
@@ -3242,8 +3390,20 @@ impl eframe::App for CheatuApp {
                 if let file_dialog::Outcome::Picked(path) = outcome {
                     match purpose {
                         DialogPurpose::OpenTable => self.open_table_file(path),
-                        DialogPurpose::SaveTable => self.save_table(path),
+                        DialogPurpose::SaveTable => {
+                            self.save_table(path);
+                            // Saved on the way to quitting or opening.
+                            if let Some(p) = self.after_save.take() {
+                                if !self.saved_mark.is_dirty(&self.saved) {
+                                    if let Some(next) = self.go_ahead(ctx, p) {
+                                        self.open_file_dialog(next);
+                                    }
+                                }
+                            }
+                        }
                     }
+                } else {
+                    self.after_save = None;
                 }
             }
         }

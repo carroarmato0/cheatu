@@ -452,6 +452,44 @@ fn advanced_row(ui: &mut egui::Ui, i: usize, e: &mut GuiEntry, cx: &Ctx, out: &m
     });
 }
 
+/// Something that would lose unsaved cheats, waiting on an answer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Pending {
+    Quit,
+    Open,
+}
+
+/// The answer to "Save changes?".
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Save,
+    DontSave,
+    Cancel,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CloseAction {
+    /// Go ahead.
+    Close,
+    /// Ask "Save changes?" first.
+    Ask,
+    /// Stay: the user cancelled.
+    Stay,
+    /// Save, and go ahead once that worked.
+    SaveThenClose,
+}
+
+/// Whether quitting (or opening another table) may go ahead now.
+pub fn close_decision(dirty: bool, answer: Option<Answer>) -> CloseAction {
+    match (dirty, answer) {
+        (false, _) => CloseAction::Close,
+        (true, None) => CloseAction::Ask,
+        (true, Some(Answer::Cancel)) => CloseAction::Stay,
+        (true, Some(Answer::Save)) => CloseAction::SaveThenClose,
+        (true, Some(Answer::DontSave)) => CloseAction::Close,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +591,40 @@ mod tests {
         assert_eq!(
             make_lasting_tool(&regions, 0x9800),
             MakeLasting::PointerScan
+        );
+    }
+
+    #[test]
+    fn close_decision_clean_closes() {
+        assert_eq!(close_decision(false, None), CloseAction::Close);
+    }
+
+    #[test]
+    fn close_decision_dirty_asks() {
+        assert_eq!(close_decision(true, None), CloseAction::Ask);
+    }
+
+    #[test]
+    fn close_decision_cancel_stays() {
+        assert_eq!(
+            close_decision(true, Some(Answer::Cancel)),
+            CloseAction::Stay
+        );
+    }
+
+    #[test]
+    fn close_decision_save_saves_then_closes() {
+        assert_eq!(
+            close_decision(true, Some(Answer::Save)),
+            CloseAction::SaveThenClose
+        );
+    }
+
+    #[test]
+    fn close_decision_dont_save_closes() {
+        assert_eq!(
+            close_decision(true, Some(Answer::DontSave)),
+            CloseAction::Close
         );
     }
 }
