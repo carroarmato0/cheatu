@@ -9,13 +9,14 @@
 mod cheat_table;
 mod file_dialog;
 mod pointer_window;
-#[allow(dead_code)] // used from Task 3 on (screen model, game list)
 mod rpg_detect;
+mod screen;
 mod settings;
 mod theme;
 mod wizard;
 mod wizard_ui;
 
+use screen::{RpgPick, Screen, ScreenState};
 use theme::{SystemTheme, Theme, ThemePref};
 
 use std::collections::HashMap;
@@ -461,14 +462,6 @@ impl TypeSel {
             TypeSel::Aob | TypeSel::Str => Vec::new(),
         }
     }
-}
-
-/// Which backend the UI is showing.
-#[derive(Copy, Clone, PartialEq, Eq, Default)]
-enum AppMode {
-    #[default]
-    Scanner,
-    RpgMaker,
 }
 
 /// Which database category the RPG Maker panel is showing.
@@ -1262,7 +1255,13 @@ fn now_ms() -> u64 {
 
 #[derive(Default)]
 struct CheatuApp {
-    mode: AppMode,
+    /// What the user chose for an attached RPG Maker game.
+    rpg_pick: RpgPick,
+    /// "RPG Maker game not running yet? Set it up…" was used.
+    rpg_setup: bool,
+    /// The attached game's engine, when it is an RPG Maker game.
+    attached_rpg: Option<cheatu_inject::Engine>,
+    detections: rpg_detect::Detections,
     rpg: RpgState,
 
     scanner: Option<Scanner>,
@@ -1375,18 +1374,18 @@ impl CheatuApp {
     fn attach(&mut self, pid: i32) {
         match Scanner::new(pid) {
             Ok(s) => {
-                let name = self
+                let info = self
                     .procs
                     .iter()
                     .find(|p| p.pid == pid)
-                    .map(|p| p.name.clone())
-                    .or_else(|| {
-                        list_processes()
-                            .into_iter()
-                            .find(|p| p.pid == pid)
-                            .map(|p| p.name)
-                    })
-                    .unwrap_or_else(|| "?".into());
+                    .cloned()
+                    .or_else(|| list_processes().into_iter().find(|p| p.pid == pid));
+                let name = info.as_ref().map_or_else(|| "?".into(), |p| p.name.clone());
+                if self.attached.as_ref().map(|(p, _)| *p) != Some(pid) {
+                    self.rpg_pick = RpgPick::Undecided;
+                }
+                self.attached_rpg = info.as_ref().and_then(|p| self.detections.get(p));
+                self.rpg_setup = false;
                 self.attached = Some((pid, name));
                 self.scanner = Some(s);
                 self.needs_elevation = None;
@@ -1429,6 +1428,35 @@ impl CheatuApp {
                     self.status = format!("Failed to attach to pid {pid}: {e}.");
                 }
             }
+        }
+    }
+
+    /// Let go of the game: back to the game list. Cheats stay in My cheats.
+    fn detach(&mut self) {
+        self.attached = None;
+        self.scanner = None;
+        self.live = None;
+        self.live_error = None;
+        self.attached_rpg = None;
+        self.rpg_pick = RpgPick::Undecided;
+        self.display.clear();
+        self.result_count = 0;
+        self.resolve_generation += 1;
+        for e in &mut self.saved {
+            e.resolved = Err("not attached".into());
+            e.write_failed = false;
+            e.needs_resolve = true;
+        }
+        self.status = "Detached.".into();
+    }
+
+    fn screen_state(&self) -> ScreenState {
+        ScreenState {
+            attached: self.attached.is_some(),
+            rpg: self.attached_rpg,
+            pick: self.rpg_pick,
+            advanced: self.advanced,
+            rpg_setup: self.rpg_setup,
         }
     }
 
@@ -2254,7 +2282,6 @@ impl eframe::App for CheatuApp {
         // Row to make an AoB signature for / to pointer scan.
         let mut do_signature: Option<usize> = None;
         let mut do_ptr_scan: Option<usize> = None;
-        let mut do_wizard = false;
         // Results column header the user clicked, applied once the table has
         // let go of `self.display`.
         let mut new_res_sort: Option<ResSort> = None;
@@ -2265,55 +2292,43 @@ impl eframe::App for CheatuApp {
         let mut do_probe: Vec<(u64, usize)> = Vec::new();
 
         // ---- Header -----------------------------------------------------
+        let screen = screen::screen(&self.screen_state());
+        let do_wizard = screen::wizard_runs(screen);
+        let mut do_detach = false;
+        let mut advanced_changed = false;
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("cheatu");
-                ui.separator();
-                ui.selectable_value(&mut self.mode, AppMode::Scanner, "🔍 Memory scanner");
-                ui.selectable_value(&mut self.mode, AppMode::RpgMaker, "🎮 RPG Maker (JS)");
-                ui.separator();
-                if self.mode == AppMode::Scanner {
-                    match &self.attached {
-                        Some((pid, name)) => {
-                            ui.label(format!("Attached: {name} (pid {pid})"));
+                if let Some((_, name)) = &self.attached {
+                    ui.separator();
+                    ui.menu_button(format!("{name} ▾"), |ui| {
+                        if ui.button("Change game…").clicked() {
+                            do_detach = true;
+                            ui.close_menu();
                         }
-                        None => {
-                            ui.label(egui::RichText::new("No process attached").weak());
+                        if ui.button("Detach").clicked() {
+                            do_detach = true;
+                            ui.close_menu();
                         }
-                    }
-                    if ui.button("Select process…").clicked() {
-                        do_refresh_procs = true;
-                        self.show_picker = true;
-                    }
-                    if ui
-                        .add_enabled(self.attached.is_some(), egui::Button::new("New cheat…"))
-                        .on_hover_text(
-                            "Step by step: find a value, make it survive game restarts, \
-                             and add it to the cheat table",
-                        )
-                        .on_disabled_hover_text("Attach to a process first.")
-                        .clicked()
-                    {
-                        do_wizard = true;
-                    }
-                    // Attach failed for lack of ptrace rights: offer to relaunch
-                    // elevated and re-attach to the same target in one click.
-                    if let Some(pid) = self.needs_elevation {
-                        if !privilege::is_root()
-                            && privilege::elevation_available()
-                            && ui
-                                .add(egui::Button::new("🔒 Elevate & attach"))
-                                .on_hover_text(format!(
-                                    "Relaunch with root via {} and re-attach to this process",
-                                    privilege::elevation_tool()
-                                ))
+                        if self.attached_rpg.is_some() {
+                            ui.separator();
+                            if ui
+                                .radio(self.rpg_pick == RpgPick::RpgMaker, "RPG Maker mode")
                                 .clicked()
-                        {
-                            do_elevate = true;
-                            elevate_for = Some(pid);
+                            {
+                                self.rpg_pick = RpgPick::RpgMaker;
+                                ui.close_menu();
+                            }
+                            if ui
+                                .radio(self.rpg_pick == RpgPick::Memory, "Memory scanner")
+                                .clicked()
+                            {
+                                self.rpg_pick = RpgPick::Memory;
+                                ui.close_menu();
+                            }
                         }
-                    }
+                    });
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2324,18 +2339,34 @@ impl eframe::App for CheatuApp {
                         self.show_settings = true;
                     }
                     ui.separator();
-                    if privilege::is_root() {
-                        ui.label(egui::RichText::new("root").color(ok_color(ui)));
-                    } else {
-                        if ui.button("Request root access").clicked() {
-                            do_elevate = true;
-                        }
-                        ui.label(egui::RichText::new("limited privileges").color(warn_color(ui)));
+                    if ui
+                        .checkbox(&mut self.advanced, "Advanced")
+                        .on_hover_text("Show the full scanner and every tool")
+                        .changed()
+                    {
+                        advanced_changed = true;
+                    }
+                    if self.advanced
+                        && ui
+                            .button("✨ Guided…")
+                            .on_hover_text("Find a value step by step")
+                            .clicked()
+                    {
+                        self.advanced = false;
+                        advanced_changed = true;
                     }
                 });
             });
             ui.add_space(4.0);
         });
+        if do_detach {
+            self.detach();
+        }
+        if advanced_changed {
+            if let Err(e) = settings::save(&self.settings()) {
+                self.status = format!("Could not save the settings: {e}.");
+            }
+        }
 
         // ---- Status bar -------------------------------------------------
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -2390,7 +2421,7 @@ impl eframe::App for CheatuApp {
         // Bound outside the panel so the rows can read live values while
         // `self.saved` is borrowed mutably.
         let scanner_ref = self.scanner.as_ref();
-        if self.mode == AppMode::Scanner {
+        if matches!(screen, Screen::Guided | Screen::Scanner) {
             let max_width =
                 (ctx.screen_rect().width() - RESULTS_MIN_WIDTH).max(CHEAT_TABLE_MIN_WIDTH);
             egui::SidePanel::right("cheat_table")
@@ -2677,9 +2708,48 @@ impl eframe::App for CheatuApp {
         let first_block = self.scan_blocker(true);
         let next_block = self.scan_blocker(false);
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.mode == AppMode::RpgMaker {
-                self.rpg.ui(ui);
-                return;
+            // Admin rights, wherever the attach was refused.
+            if let Some(pid) = self.needs_elevation {
+                if !privilege::is_root() && privilege::elevation_available() {
+                    ui.horizontal(|ui| {
+                        ui.label("This game needs admin rights.");
+                        if ui.button("Ask for them").clicked() {
+                            do_elevate = true;
+                            elevate_for = Some(pid);
+                        }
+                    });
+                    ui.separator();
+                }
+            }
+            match screen {
+                Screen::RpgMaker => {
+                    self.rpg.ui(ui);
+                    return;
+                }
+                Screen::ChooseGame => {
+                    // Until the start screen lands: the list opens by itself.
+                    if !self.show_picker {
+                        self.show_picker = true;
+                        do_refresh_procs = true;
+                    }
+                    ui.heading("Which game do you want to cheat in?");
+                    return;
+                }
+                Screen::RpgChoice => {
+                    ui.heading("This is an RPG Maker game");
+                    if ui.button("Use RPG Maker mode").clicked() {
+                        self.rpg_pick = RpgPick::RpgMaker;
+                    }
+                    if ui.button("Scan memory").clicked() {
+                        self.rpg_pick = RpgPick::Memory;
+                    }
+                    return;
+                }
+                Screen::Guided => {
+                    ui.label("Follow the steps in the window.");
+                    return;
+                }
+                Screen::Scanner => {}
             }
             let attached = self.scanner.is_some();
             let busy = self.scanning;
@@ -3678,7 +3748,7 @@ impl eframe::App for CheatuApp {
             || self.sig_pending.is_some()
             || self.pointer_window.as_ref().is_some_and(|w| w.busy())
             || self.wizard.as_ref().is_some_and(|w| w.needs_repaint())
-            || self.mode == AppMode::RpgMaker
+            || screen == Screen::RpgMaker
         {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
