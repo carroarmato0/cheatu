@@ -1,5 +1,5 @@
 //! The GUI's preferences in `config.json`: theme, the Advanced view and
-//! whether the probe is enabled.
+//! the remembered view.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,8 +11,6 @@ pub struct Settings {
     pub theme: ThemePref,
     /// Show the full scanner and every tool instead of the guided steps.
     pub advanced: bool,
-    /// Offer the probe (test writes) in the guided view.
-    pub probe: bool,
 }
 
 /// Path of `config.json`, the platform's convention for user config.
@@ -60,7 +58,6 @@ pub fn load_from(path: &Path) -> Settings {
     Settings {
         theme: ThemePref::from_name(v.get("theme").and_then(serde_json::Value::as_str)),
         advanced: flag("advanced"),
-        probe: flag("probe"),
     }
 }
 
@@ -75,7 +72,6 @@ pub fn save_to(path: &Path, home: &Path, s: &Settings) -> io::Result<()> {
     let json = serde_json::json!({
         "theme": s.theme.name(),
         "advanced": s.advanced,
-        "probe": s.probe,
     });
     std::fs::write(path, json.to_string())?;
     give_config_to_home_owner(path, home)
@@ -144,7 +140,6 @@ mod tests {
         let s = Settings {
             theme: ThemePref::Light,
             advanced: true,
-            probe: true,
         };
         save_to(&path, &home, &s).unwrap();
         assert_eq!(load_from(&path), s);

@@ -332,7 +332,6 @@ pub fn savable_value(ty: ScanType, s: &str) -> bool {
     }
 }
 
-/// Pids of running processes whose name is exactly `name`.
 /// A cheat for this address and type is already in My cheats.
 pub fn already_saved(saved: &[GuiEntry], addr: u64, ty: ScanType) -> bool {
     saved
@@ -340,6 +339,7 @@ pub fn already_saved(saved: &[GuiEntry], addr: u64, ty: ScanType) -> bool {
         .any(|e| e.resolved == Ok(addr) && e.entry.ty == ty)
 }
 
+/// Pids of running processes whose name is exactly `name`.
 pub fn processes_named(procs: &[ProcInfo], name: &str) -> Vec<i32> {
     procs
         .iter()

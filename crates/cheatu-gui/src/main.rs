@@ -163,7 +163,6 @@ fn main() -> eframe::Result<()> {
                 theme,
                 system_theme: Some(system_theme),
                 advanced: settings.advanced,
-                enable_probe: settings.probe,
                 // Set when we were relaunched elevated for a specific target;
                 // attached on the first frame so the user lands back on scanning.
                 pending_attach: privilege::attach_target(),
@@ -1360,10 +1359,6 @@ struct CheatuApp {
     sig_pending: Option<Receiver<cheat_table::BgSignature>>,
     /// The pointer scan window, while open.
     pointer_window: Option<PointerWindow>,
-    /// The "New cheat" wizard, while open.
-    /// The game the guided steps' wizard was started for (or followed to
-    /// after a restart); attaching to any other game restarts it.
-    /// Confirmations and errors next to the control that caused them.
     /// Which My cheats rows are unfolded or being renamed.
     cheats_ui: my_cheats::PanelState,
     /// My cheats as last saved or opened, for the unsaved marker.
@@ -1372,13 +1367,19 @@ struct CheatuApp {
     confirm: Option<Confirm>,
     /// Quit or open once the "Save changes?" save finishes.
     after_save: Option<Pending>,
-    /// The user chose to quit without saving.
     /// Relaunch elevated (attaching to this game) once "Save changes?" is
     /// answered.
     elevate_now: Option<Option<i32>>,
+    /// The user chose to quit without saving.
     allow_close: bool,
+    /// Confirmations and errors next to the control that caused them.
     feedback: Feedback,
+    /// A restarted game the guided steps followed while a search ran.
+    pending_follow: Option<i32>,
+    /// The game the guided steps' wizard was started for (or followed to
+    /// after a restart); attaching to any other game restarts it.
     wizard_for: Option<i32>,
+    /// The guided steps' wizard, while the guided view is shown.
     wizard: Option<WizardWindow>,
 
     // Background freeze.
@@ -1393,9 +1394,6 @@ struct CheatuApp {
     applied_theme: Option<Theme>,
     show_about: bool,
     show_settings: bool,
-    /// Opt-in to the destructive auto-probe (writes to live target memory).
-    /// Off by default each run — the safe default.
-    enable_probe: bool,
     /// Show the full scanner and every tool instead of the guided steps.
     advanced: bool,
 }
@@ -2325,6 +2323,25 @@ impl CheatuApp {
         }
     }
 
+    /// Remove every cheat (their freezes lift with them: `sync_freezes`).
+    fn clear_cheats(&mut self) {
+        self.saved.clear();
+        self.table_path = None;
+        self.table_process = None;
+        // Removed on purpose: nothing is left to save.
+        self.saved_mark = my_cheats::Saved::default();
+        self.status = "Removed all cheats.".into();
+    }
+
+    /// The guided steps followed the game to a restart while a search ran:
+    /// follow it now that the search is done.
+    fn apply_pending_follow(&mut self) {
+        if let Some(pid) = self.pending_follow.take() {
+            self.attach_restarted(pid);
+            self.wizard_for = Some(pid);
+        }
+    }
+
     /// Leave the RPG Maker screen opened without a game.
     fn back_to_game_list(&mut self) {
         self.rpg_setup = false;
@@ -2352,7 +2369,6 @@ impl CheatuApp {
         settings::Settings {
             theme: self.theme,
             advanced: self.advanced,
-            probe: self.enable_probe,
         }
     }
 
@@ -2397,6 +2413,13 @@ impl eframe::App for CheatuApp {
         }
         self.ensure_freeze_thread();
         self.poll_scan();
+        if !self.scanning {
+            self.apply_pending_follow();
+        }
+        // Notes next to controls would float over others after a scroll.
+        if ctx.input(|i| i.smooth_scroll_delta != egui::Vec2::ZERO) {
+            self.feedback.scrolled();
+        }
         self.poll_probe();
         self.resolve_entries();
         self.poll_signature();
@@ -2728,9 +2751,10 @@ impl eframe::App for CheatuApp {
                             }
                             // Follow the guided steps to the restarted game, so
                             // My cheats re-resolve there.
-                            WizardEvent::Reattached(_) if self.scanning => {
-                                self.status = "The game restarted; attach to it from the game \
-                                               list once the search is done."
+                            WizardEvent::Reattached(pid) if self.scanning => {
+                                self.pending_follow = Some(pid);
+                                self.status = "The game restarted; cheatu follows it once the \
+                                               search is done."
                                     .into();
                             }
                             WizardEvent::Reattached(pid) => {
@@ -2969,7 +2993,7 @@ impl eframe::App for CheatuApp {
                 }
                 // Probing one row at a time is fine for three candidates and
                 // tedious for thirty, which is exactly when you need it.
-                if (self.enable_probe || self.advanced) && !self.display.is_empty() {
+                if !self.display.is_empty() {
                     let n = self.display.len().min(PROBE_BATCH_MAX);
                     if ui
                         .add_enabled(
@@ -2986,22 +3010,6 @@ impl eframe::App for CheatuApp {
                     }
                 }
             });
-            // The probe is the only thing here that tells two same-region
-            // candidates apart, and it's invisible until switched on — say so
-            // once the list is short enough that it's the obvious next step.
-            if !(self.enable_probe || self.advanced)
-                && self.result_count > 1
-                && self.result_count <= HINT_THRESHOLD
-            {
-                ui.label(
-                    egui::RichText::new(
-                        "Can't tell these apart? Turn on “Enable probe” in ⚙ Settings — it \
-                         writes a test value and sees which address the game overwrites.",
-                    )
-                    .weak()
-                    .small(),
-                );
-            }
 
             // Results table (virtualized). Each row carries its own type, so
             // "Any" scans show a mix of i32/f32/… hits with the right decoding.
@@ -3011,7 +3019,7 @@ impl eframe::App for CheatuApp {
             let show_hints = self.show_hints;
             // Auto-probe state, hoisted so the row closure needn't borrow &mut self.
             // The scanner (Advanced) always offers the probe.
-            let enable_probe = self.enable_probe || self.advanced;
+            let enable_probe = true;
             let probe_busy = self.scanning || self.probe_pending.is_some();
             let probe_results = &self.probe_results;
             let saved = &self.saved;
@@ -3538,10 +3546,12 @@ impl eframe::App for CheatuApp {
             self.game_rows = start_screen::fold(&self.procs, &mut |p| detections.get(p));
             // Preselect the most likely game, unless the user picked one
             // that is still running.
-            let still_valid = self
-                .list
-                .selected
-                .is_some_and(|pid| self.procs.iter().any(|p| p.pid == pid));
+            let still_valid = start_screen::selection_valid(
+                self.list.selected,
+                &self.game_rows,
+                &self.procs,
+                self.advanced,
+            );
             if !still_valid {
                 self.list.selected = start_screen::best_guess(&self.game_rows);
             }
@@ -3615,12 +3625,7 @@ impl eframe::App for CheatuApp {
             self.sort_display();
         }
         if clear_table {
-            // sync_freezes() runs each frame, so dropping the rows also lifts
-            // their freezes.
-            self.saved.clear();
-            self.table_path = None;
-            self.table_process = None;
-            self.status = "Removed all cheats.".into();
+            self.clear_cheats();
         }
         // A one-shot write. Freezing writes continuously; this is for the far
         // more common "set it once and see what happens".
@@ -3866,6 +3871,32 @@ mod tests {
         // M8: the title stays the detected folder while the field is edited.
         app.rpg.dir = "/somewhere/else".into();
         assert_eq!(app.game_title(), "Sakura Quest");
+    }
+
+    /// M5: removing every cheat on purpose leaves nothing to save.
+    #[test]
+    fn remove_all_leaves_nothing_unsaved() {
+        let mut app = CheatuApp {
+            saved: vec![cheat("\"game\"+0x10", "1", false)],
+            ..Default::default()
+        };
+        app.saved_mark.mark(&app.saved);
+        app.clear_cheats();
+        assert!(!app.saved_mark.is_dirty(&app.saved));
+    }
+
+    /// M7: a restart followed during a search is attached once it is done.
+    #[test]
+    fn restart_followed_after_the_search() {
+        let mut app = CheatuApp {
+            attached: Some((1, "Game".into())),
+            pending_follow: Some(own_pid()),
+            ..Default::default()
+        };
+        app.apply_pending_follow();
+        assert_eq!(app.attached.as_ref().map(|(p, _)| *p), Some(own_pid()));
+        assert_eq!(app.wizard_for, Some(own_pid()));
+        assert_eq!(app.pending_follow, None);
     }
 
     /// I5: a plain address means nothing in another game: never freeze into it.

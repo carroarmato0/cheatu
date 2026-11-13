@@ -60,6 +60,12 @@ impl Feedback {
         }
     }
 
+    /// The view scrolled: notes anchored to where controls were would float
+    /// over other ones, so they go (the status bar keeps the last message).
+    pub fn scrolled(&mut self) {
+        self.notes.clear();
+    }
+
     /// Draw the notes; × dismisses an error.
     pub fn show(&mut self, ctx: &egui::Context, now: Instant) {
         self.notes.retain(|n| n.live(now));
@@ -116,6 +122,17 @@ mod tests {
         f.ok(rect(0.0), "✔ Wrote 999", t0);
         assert_eq!(f.live(t0 + Duration::from_millis(2900)), 1);
         assert_eq!(f.live(t0 + Duration::from_millis(3100)), 0);
+    }
+
+    /// M10
+    #[test]
+    fn scrolling_clears_notes() {
+        let t0 = Instant::now();
+        let mut f = Feedback::default();
+        f.ok(rect(0.0), "✔ Added", t0);
+        f.error(rect(40.0), "Write failed", t0);
+        f.scrolled();
+        assert_eq!(f.live(t0), 0);
     }
 
     #[test]

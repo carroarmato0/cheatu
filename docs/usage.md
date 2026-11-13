@@ -72,7 +72,7 @@ The header shows **cheatu** and, once a game is attached, the game's name with a
 **⏷** menu (**Change game…**, **Detach**, and for RPG Maker games the
 **RPG Maker mode** / **Memory scanner** choice). On the right: **✨ Guided…**
 (only with Advanced on), the **Advanced** checkbox (remembered between runs),
-**⚙ Settings** and **ⓘ About**.
+**⚙ Settings** and **ℹ About**.
 
 ### Choosing a game
 
@@ -231,8 +231,8 @@ someone else.
   **🎯 Pointer scan…** (see [Pointer scanner](#pointer-scanner); the right tool
   for values on the heap).
 - **Opening a table never writes to the game's memory.** All freezes start
-  off, whatever the file says; rows that were frozen when saved are marked
-  *frozen when saved* until you click ❄ yourself. This makes it safe to open a
+  off, whatever the file says; a cheat that was frozen when saved says so in
+  its details (*Was frozen when saved*) until you freeze it again. This makes it safe to open a
   table someone else gave you: nothing happens until you freeze or **Set** a
   row.
 - When the table names a `process` and nothing is attached, cheatu offers to

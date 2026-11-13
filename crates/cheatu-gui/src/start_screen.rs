@@ -169,6 +169,22 @@ pub fn fold(
     rows
 }
 
+/// Whether the selected pid is still something the list shows.
+pub fn selection_valid(
+    selected: Option<i32>,
+    rows: &[GameRow],
+    procs: &[ProcInfo],
+    advanced: bool,
+) -> bool {
+    selected.is_some_and(|pid| {
+        if advanced {
+            procs.iter().any(|p| p.pid == pid)
+        } else {
+            rows.iter().any(|r| r.pid == pid)
+        }
+    })
+}
+
 /// The row most likely to be the game: an RPG Maker game, else a Wine/Proton
 /// program, else a multi-process app's renderer, else the largest program.
 pub fn best_guess(rows: &[GameRow]) -> Option<i32> {
@@ -638,6 +654,31 @@ mod tests {
         });
         assert_eq!(rows[0].dir.as_deref(), Some(std::path::Path::new("/g")));
         assert_eq!(rows[0].engine, Some(Engine::RpgMakerMV));
+    }
+
+    /// M9: a folded row's pid can change (its largest renderer); the old
+    /// one must not stay selected just because the process still runs.
+    #[test]
+    fn selection_must_be_a_shown_row() {
+        let procs = family(
+            vec![
+                p(10, "Game", "/g/Game", 50, Some("main")),
+                p(11, "Game", "/g/Game --type=renderer", 300, Some("renderer")),
+                p(12, "Game", "/g/Game --type=renderer", 900, Some("renderer")),
+            ],
+            10,
+        );
+        let rows = fold(&procs, &mut no_engine);
+        assert!(
+            !selection_valid(Some(11), &rows, &procs, false),
+            "11 is folded away"
+        );
+        assert!(selection_valid(Some(12), &rows, &procs, false));
+        assert!(
+            selection_valid(Some(11), &rows, &procs, true),
+            "Advanced lists every process"
+        );
+        assert!(!selection_valid(None, &rows, &procs, false));
     }
 
     #[test]
