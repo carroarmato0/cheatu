@@ -564,6 +564,7 @@ frozen = true
     #[test]
     fn processes_are_matched_by_exact_name() {
         let p = |pid, name: &str| ProcInfo {
+            ppid: 1,
             pid,
             name: name.into(),
             cmdline: String::new(),

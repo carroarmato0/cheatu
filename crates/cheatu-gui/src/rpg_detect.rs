@@ -1,7 +1,7 @@
 //! Is a running process an RPG Maker game? From its program path, find the
 //! game folder and ask `cheatu_inject::detect_dir`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use cheatu_core::process::ProcInfo;
@@ -33,8 +33,11 @@ pub fn wine_to_unix(path: &str, prefix: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
-/// The directory holding the program a command line starts: the longest
-/// run of leading words (paths may contain spaces) that names a file.
+/// The directory holding the program a command line starts: the first
+/// (shortest) run of leading words that names a file — paths may contain
+/// spaces, and the words after the program are its arguments. A relative
+/// program path is not resolved (the process's working directory is
+/// unknown), so such a program is not detected.
 pub fn program_dir(cmdline: &str, prefix: Option<&Path>) -> Option<PathBuf> {
     let words: Vec<&str> = cmdline.split_whitespace().take(MAX_PATH_WORDS).collect();
     (1..=words.len()).find_map(|k| {
@@ -46,6 +49,7 @@ pub fn program_dir(cmdline: &str, prefix: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// The RPG Maker engine of the game a command line starts, if any.
+#[cfg(test)]
 pub fn detect_game(cmdline: &str, prefix: Option<&Path>) -> Option<Engine> {
     game_dir(cmdline, prefix).map(|(_, e)| e)
 }
@@ -61,23 +65,41 @@ pub fn game_dir(cmdline: &str, prefix: Option<&Path>) -> Option<(PathBuf, Engine
 
 /// The folder to prefill in RPG Maker mode for a running game: where its
 /// RPG Maker files were found.
+#[cfg(test)]
 pub fn rpg_folder_for(cmdline: &str, prefix: Option<&Path>) -> Option<PathBuf> {
     game_dir(cmdline, prefix).map(|(dir, _)| dir)
 }
 
 /// Detection results per pid, so the game list does not hit the disk every
-/// frame.
+/// frame. A pid seen again with another command line is another program and
+/// is looked up again.
 #[derive(Default)]
 pub struct Detections {
-    by_pid: HashMap<i32, Option<Engine>>,
+    by_pid: HashMap<i32, (String, Option<(PathBuf, Engine)>)>,
 }
 
 impl Detections {
-    pub fn get(&mut self, p: &ProcInfo) -> Option<Engine> {
-        *self.by_pid.entry(p.pid).or_insert_with(|| {
-            let prefix = cheatu_core::process::env_var(p.pid, "WINEPREFIX").map(PathBuf::from);
-            detect_game(&p.cmdline, prefix.as_deref())
-        })
+    /// The game folder and engine of `p`'s RPG Maker game, if it is one. Only
+    /// processes of a multi-process app are looked up: RPG Maker MV/MZ games
+    /// run on NW.js, so every one of them has a Chromium role.
+    pub fn get(&mut self, p: &ProcInfo) -> Option<(PathBuf, Engine)> {
+        p.role.as_ref()?;
+        if let Some((cmdline, found)) = self.by_pid.get(&p.pid) {
+            if *cmdline == p.cmdline {
+                return found.clone();
+            }
+        }
+        let prefix = cheatu_core::process::env_var(p.pid, "WINEPREFIX").map(PathBuf::from);
+        let found = game_dir(&p.cmdline, prefix.as_deref());
+        self.by_pid
+            .insert(p.pid, (p.cmdline.clone(), found.clone()));
+        found
+    }
+
+    /// Forget processes that are gone.
+    pub fn retain_running(&mut self, procs: &[ProcInfo]) {
+        let running: HashSet<i32> = procs.iter().map(|p| p.pid).collect();
+        self.by_pid.retain(|pid, _| running.contains(pid));
     }
 }
 
@@ -175,6 +197,49 @@ mod tests {
         let cmd = format!("{}/G/bin/nw --x", d.display());
         assert_eq!(rpg_folder_for(&cmd, None), Some(d.join("G")));
         assert_eq!(rpg_folder_for("/bin/ls", None), None);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    fn proc_info(pid: i32, cmdline: &str, role: Option<&str>) -> ProcInfo {
+        ProcInfo {
+            pid,
+            ppid: 1,
+            name: "Game".into(),
+            cmdline: cmdline.into(),
+            rss_bytes: 1,
+            is_wine: false,
+            role: role.map(str::to_owned),
+            accessible: true,
+        }
+    }
+
+    /// M1: a pid the system hands out again is another program.
+    #[test]
+    fn detections_redetect_when_pid_is_reused() {
+        let d = tmp("reuse");
+        touch(&d.join("G/js/rmmz_core.js"));
+        touch(&d.join("G/Game"));
+        let game = format!("{}/G/Game --type=renderer", d.display());
+        let mut det = Detections::default();
+        let found = det.get(&proc_info(5, &game, Some("renderer")));
+        assert_eq!(found, Some((d.join("G"), Engine::RpgMakerMZ)));
+        assert_eq!(
+            det.get(&proc_info(5, "/bin/ls --type=renderer", Some("renderer"))),
+            None
+        );
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// M2: RPG Maker games are NW.js, always several processes; a single
+    /// process is never looked up on disk.
+    #[test]
+    fn detections_skip_single_process_programs() {
+        let d = tmp("single");
+        touch(&d.join("G/js/rmmz_core.js"));
+        touch(&d.join("G/Game"));
+        let mut det = Detections::default();
+        let cmd = format!("{}/G/Game", d.display());
+        assert_eq!(det.get(&proc_info(6, &cmd, None)), None);
         fs::remove_dir_all(&d).unwrap();
     }
 

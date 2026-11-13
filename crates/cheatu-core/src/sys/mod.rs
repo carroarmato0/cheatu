@@ -22,6 +22,8 @@ compile_error!("cheatu supports Linux and macOS only");
 /// heuristics (Wine/Proton, Chromium role, accessibility) are applied.
 pub(crate) struct RawProc {
     pub pid: i32,
+    /// Parent pid, 0 when unknown.
+    pub ppid: i32,
     pub name: String,
     pub cmdline: String,
     pub rss_bytes: u64,

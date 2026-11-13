@@ -1155,6 +1155,7 @@ mod tests {
 
     fn proc(pid: i32, name: &str) -> ProcInfo {
         ProcInfo {
+            ppid: 1,
             pid,
             name: name.into(),
             cmdline: String::new(),

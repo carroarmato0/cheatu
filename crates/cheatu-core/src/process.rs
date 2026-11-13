@@ -4,6 +4,9 @@
 #[derive(Clone, Debug)]
 pub struct ProcInfo {
     pub pid: i32,
+    /// Parent pid, 0 when unknown. Tells apart two runs of one multi-process
+    /// app (their helpers hang off different main processes).
+    pub ppid: i32,
     /// `comm` (short name, up to 15 chars).
     pub name: String,
     /// Full command line (argv joined with spaces), best-effort.
@@ -74,6 +77,7 @@ pub fn list_processes() -> Vec<ProcInfo> {
         .into_iter()
         .map(|p| ProcInfo {
             pid: p.pid,
+            ppid: p.ppid,
             role: detect_role(&p.cmdline),
             is_wine: detect_wine(p.pid, &p.cmdline),
             rss_bytes: p.rss_bytes,
@@ -157,5 +161,20 @@ fn send_signal(pid: i32, sig: i32) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Multi-process apps are told apart by their process tree.
+    #[test]
+    fn own_process_reports_its_parent() {
+        let me = std::process::id() as i32;
+        // SAFETY: getppid has no preconditions.
+        let parent = unsafe { libc::getppid() };
+        let p = list_processes().into_iter().find(|p| p.pid == me).unwrap();
+        assert_eq!(p.ppid, parent);
     }
 }

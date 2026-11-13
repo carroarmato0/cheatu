@@ -97,6 +97,18 @@ pub(crate) fn read_maps(pid: i32) -> io::Result<Vec<MemoryRegion>> {
 
 /// All processes visible in `/proc`, unsorted. Kernel threads (which have no
 /// command line) are skipped.
+/// The parent pid from `/proc/<pid>/stat`: the field after the state, which
+/// follows the parenthesised command name (that may itself contain `)`).
+fn read_ppid(pid: i32) -> i32 {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            let rest = &s[s.rfind(')')? + 1..];
+            rest.split_whitespace().nth(1)?.parse().ok()
+        })
+        .unwrap_or(0)
+}
+
 pub(crate) fn raw_processes() -> Vec<RawProc> {
     let page_size = page_size();
     let mut out = Vec::new();
@@ -133,6 +145,7 @@ pub(crate) fn raw_processes() -> Vec<RawProc> {
 
         out.push(RawProc {
             pid,
+            ppid: read_ppid(pid),
             name: comm,
             cmdline,
             rss_bytes: read_rss(pid, page_size),

@@ -339,6 +339,28 @@ fn page_size() -> u64 {
 
 /// All processes libproc reports, unsorted. Processes with neither readable
 /// arguments nor an executable path (e.g. `kernel_task`) are skipped.
+/// The parent pid from `PROC_PIDTBSDINFO`, 0 when it cannot be read.
+fn parent_pid(pid: i32) -> i32 {
+    // SAFETY: proc_bsdinfo is plain old data; all-zero is a valid value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: the buffer is a proc_bsdinfo of `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if n == size {
+        info.pbi_ppid as i32
+    } else {
+        0
+    }
+}
+
 pub(crate) fn raw_processes() -> Vec<RawProc> {
     // SAFETY: a null buffer asks for the current number of pids.
     let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
@@ -365,6 +387,7 @@ pub(crate) fn raw_processes() -> Vec<RawProc> {
             };
             Some(RawProc {
                 pid,
+                ppid: parent_pid(pid),
                 name: pid_name(pid),
                 cmdline,
                 rss_bytes: resident_size(pid),

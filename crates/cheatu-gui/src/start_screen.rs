@@ -48,6 +48,8 @@ pub struct GameRow {
     pub locked: bool,
     /// Other processes folded into this row.
     pub helpers: usize,
+    /// The RPG Maker game's folder, when `engine` is set.
+    pub dir: Option<std::path::PathBuf>,
     /// It is a multi-process app whose `pid` is a renderer.
     pub renderer: bool,
 }
@@ -67,8 +69,26 @@ fn program_key(cmdline: &str) -> &str {
 /// attaches to their largest renderer, where an NW.js game keeps its data.
 pub fn fold(
     procs: &[ProcInfo],
-    engines: &mut dyn FnMut(&ProcInfo) -> Option<Engine>,
+    engines: &mut dyn FnMut(&ProcInfo) -> Option<(std::path::PathBuf, Engine)>,
 ) -> Vec<GameRow> {
+    let by_pid: std::collections::HashMap<i32, &ProcInfo> =
+        procs.iter().map(|p| (p.pid, p)).collect();
+    // The instance a process belongs to: its furthest ancestor running the
+    // same program, so two runs of one game stay two rows.
+    let instance = |p: &ProcInfo| -> i32 {
+        let key = program_key(&p.cmdline);
+        let mut cur = p;
+        let mut seen = vec![p.pid];
+        while let Some(parent) = by_pid.get(&cur.ppid) {
+            // A cycle (bogus or reused pids) ends the walk.
+            if seen.contains(&parent.pid) || program_key(&parent.cmdline) != key {
+                break;
+            }
+            seen.push(parent.pid);
+            cur = parent;
+        }
+        cur.pid
+    };
     // Programs that are multi-process apps; their other processes (a macOS
     // app's main process has no role) join them.
     let multi: std::collections::HashSet<&str> = procs
@@ -78,26 +98,28 @@ pub fn fold(
         .collect();
     let mut rows: Vec<GameRow> = Vec::new();
     // Row index per program, for the multi-process apps.
-    let mut groups: Vec<(String, usize, Vec<&ProcInfo>)> = Vec::new();
+    let mut groups: Vec<((String, i32), usize, Vec<&ProcInfo>)> = Vec::new();
     for p in procs {
         if !multi.contains(program_key(&p.cmdline)) {
+            let found = engines(p);
             rows.push(GameRow {
                 pid: p.pid,
                 name: p.name.clone(),
                 rss: p.rss_bytes,
                 wine: p.is_wine,
-                engine: engines(p),
+                engine: found.as_ref().map(|(_, e)| *e),
+                dir: found.map(|(d, _)| d),
                 locked: !p.accessible,
                 helpers: 0,
                 renderer: false,
             });
             continue;
         }
-        let key = program_key(&p.cmdline);
-        match groups.iter_mut().find(|(k, _, _)| k == key) {
+        let key = (program_key(&p.cmdline).to_string(), instance(p));
+        match groups.iter_mut().find(|(k, _, _)| *k == key) {
             Some((_, _, members)) => members.push(p),
             None => {
-                groups.push((key.to_string(), rows.len(), vec![p]));
+                groups.push((key, rows.len(), vec![p]));
                 // Placeholder, filled in below.
                 rows.push(GameRow {
                     pid: p.pid,
@@ -105,6 +127,7 @@ pub fn fold(
                     rss: 0,
                     wine: false,
                     engine: None,
+                    dir: None,
                     locked: false,
                     helpers: 0,
                     renderer: false,
@@ -112,7 +135,7 @@ pub fn fold(
             }
         }
     }
-    for (key, at, members) in groups {
+    for ((key, _), at, members) in groups {
         let renderer = members
             .iter()
             .filter(|p| p.role.as_deref() == Some("renderer"))
@@ -130,12 +153,14 @@ pub fn fold(
             .find(|p| p.role.as_deref() == Some("main"))
             .or_else(|| members.iter().find(|p| p.role.is_none()))
             .unwrap_or(&members[0]);
+        let found = members.iter().find_map(|p| engines(p));
         rows[at] = GameRow {
             pid: chosen.pid,
             name: bundle.unwrap_or_else(|| main.name.clone()),
             rss: members.iter().map(|p| p.rss_bytes).sum(),
             wine: members.iter().any(|p| p.is_wine),
-            engine: members.iter().find_map(|p| engines(p)),
+            engine: found.as_ref().map(|(_, e)| *e),
+            dir: found.map(|(d, _)| d),
             locked: !chosen.accessible,
             helpers: members.len() - 1,
             renderer: renderer.is_some(),
@@ -499,6 +524,7 @@ mod tests {
 
     fn p(pid: i32, name: &str, cmd: &str, rss: u64, role: Option<&str>) -> ProcInfo {
         ProcInfo {
+            ppid: 1,
             pid,
             name: name.into(),
             cmdline: cmd.into(),
@@ -509,7 +535,20 @@ mod tests {
         }
     }
 
-    fn no_engine(_: &ProcInfo) -> Option<Engine> {
+    /// Helpers started by `main`, as the OS reports them.
+    fn family(procs: Vec<ProcInfo>, main: i32) -> Vec<ProcInfo> {
+        procs
+            .into_iter()
+            .map(|mut q| {
+                if q.pid != main {
+                    q.ppid = main;
+                }
+                q
+            })
+            .collect()
+    }
+
+    fn no_engine(_: &ProcInfo) -> Option<(std::path::PathBuf, Engine)> {
         None
     }
 
@@ -539,6 +578,7 @@ mod tests {
                 Some("gpu-process"),
             ),
         ];
+        let procs = family(procs, 10);
         let rows = fold(&procs, &mut no_engine);
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
@@ -555,11 +595,12 @@ mod tests {
         let fw = format!("{app}/Frameworks/H.framework");
         let procs = vec![
             // Listed first, and the main process has no Chromium role.
-            p(1, "chrome_crashpad_handler", &format!("{fw}/Helpers/chrome_crashpad_handler --type=crashpad-handler"), 5, Some("crashpad-handler")),
+            p(5, "chrome_crashpad_handler", &format!("{fw}/Helpers/chrome_crashpad_handler --type=crashpad-handler"), 5, Some("crashpad-handler")),
             p(2, "Brave Browser", &format!("{app}/MacOS/Brave Browser"), 100, None),
             p(3, "Brave Helper (Renderer)", &format!("{fw}/Helpers/Brave Helper (Renderer).app/Contents/MacOS/Brave Helper (Renderer) --type=renderer"), 400, Some("renderer")),
             p(4, "Brave Helper (GPU)", &format!("{fw}/Helpers/Brave Helper (GPU).app/Contents/MacOS/Brave Helper (GPU) --type=gpu-process"), 50, Some("gpu-process")),
         ];
+        let procs = family(procs, 2);
         let rows = fold(&procs, &mut no_engine);
         assert_eq!(rows.len(), 1, "{rows:?}");
         let r = &rows[0];
@@ -567,6 +608,36 @@ mod tests {
             (r.pid, r.name.as_str(), r.helpers, r.rss),
             (3, "Brave Browser", 3, 555)
         );
+    }
+
+    /// M11: two runs of one game are two rows, each with its own renderer.
+    #[test]
+    fn two_runs_of_one_game_are_two_rows() {
+        let mut procs = vec![
+            p(10, "Game", "/g/Game", 50, Some("main")),
+            p(11, "Game", "/g/Game --type=renderer", 300, Some("renderer")),
+            p(20, "Game", "/g/Game", 50, Some("main")),
+            p(21, "Game", "/g/Game --type=renderer", 400, Some("renderer")),
+        ];
+        procs[1].ppid = 10;
+        procs[3].ppid = 20;
+        let rows = fold(&procs, &mut no_engine);
+        assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![11, 21]);
+    }
+
+    /// M4: the row carries the game's folder, for attach to use.
+    #[test]
+    fn row_carries_the_game_folder() {
+        let procs = vec![
+            p(10, "Game", "/g/Game", 50, Some("main")),
+            p(11, "Game", "/g/Game --type=renderer", 300, Some("renderer")),
+        ];
+        let procs = family(procs, 10);
+        let rows = fold(&procs, &mut |q: &ProcInfo| {
+            (q.pid == 10).then(|| (std::path::PathBuf::from("/g"), Engine::RpgMakerMV))
+        });
+        assert_eq!(rows[0].dir.as_deref(), Some(std::path::Path::new("/g")));
+        assert_eq!(rows[0].engine, Some(Engine::RpgMakerMV));
     }
 
     #[test]
@@ -589,8 +660,9 @@ mod tests {
                 Some("renderer"),
             ),
         ];
+        let procs = family(procs, 10);
         let rows = fold(&procs, &mut |q: &ProcInfo| {
-            (q.pid == 10).then_some(Engine::RpgMakerMZ)
+            (q.pid == 10).then(|| ("/g".into(), Engine::RpgMakerMZ))
         });
         assert_eq!(rows[0].engine, Some(Engine::RpgMakerMZ));
         assert_eq!(rows[0].pid, 11);
@@ -610,7 +682,7 @@ mod tests {
             p(4, "big", "/bin/big", 9000, None),
         ];
         let rows = fold(&rpg, &mut |q: &ProcInfo| {
-            (q.pid == 3).then_some(Engine::RpgMakerMV)
+            (q.pid == 3).then(|| ("/r".into(), Engine::RpgMakerMV))
         });
         assert_eq!(best_guess(&rows), Some(3));
         let plain = vec![p(5, "a", "/a", 10, None), p(6, "b", "/b", 20, None)];

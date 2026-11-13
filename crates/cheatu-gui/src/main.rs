@@ -1270,6 +1270,8 @@ struct CheatuApp {
     rpg_setup: bool,
     /// The attached game's engine, when it is an RPG Maker game.
     attached_rpg: Option<cheatu_inject::Engine>,
+    /// The attached RPG Maker game's folder, as detected when attaching.
+    attached_dir: Option<PathBuf>,
     detections: rpg_detect::Detections,
     rpg: RpgState,
 
@@ -1419,16 +1421,18 @@ impl CheatuApp {
                     self.rpg_pick = RpgPick::Undecided;
                 }
                 if !restarted {
-                    self.attached_rpg = info.as_ref().and_then(|p| self.detections.get(p));
-                }
-                // Prefill RPG Maker mode with the game's folder.
-                if self.attached_rpg.is_some() && !restarted {
-                    let folder = info.as_ref().and_then(|p| {
-                        let prefix =
-                            cheatu_core::process::env_var(p.pid, "WINEPREFIX").map(PathBuf::from);
-                        rpg_detect::rpg_folder_for(&p.cmdline, prefix.as_deref())
-                    });
-                    if let Some(dir) = folder {
+                    // What the game list showed for this row (detected over
+                    // all of the app's processes), else this process alone.
+                    let found = self
+                        .game_rows
+                        .iter()
+                        .find(|r| r.pid == pid)
+                        .and_then(|r| Some((r.dir.clone()?, r.engine?)))
+                        .or_else(|| info.as_ref().and_then(|p| self.detections.get(p)));
+                    self.attached_rpg = found.as_ref().map(|(_, e)| *e);
+                    self.attached_dir = found.map(|(d, _)| d);
+                    // Prefill RPG Maker mode with the game's folder.
+                    if let Some(dir) = &self.attached_dir {
                         self.rpg.dir = dir.to_string_lossy().into_owned();
                     }
                 }
@@ -1506,6 +1510,7 @@ impl CheatuApp {
         self.live = None;
         self.live_error = None;
         self.attached_rpg = None;
+        self.attached_dir = None;
         self.rpg_pick = RpgPick::Undecided;
         self.display.clear();
         self.result_count = 0;
@@ -1525,7 +1530,7 @@ impl CheatuApp {
             return String::new();
         };
         if self.attached_rpg.is_some() {
-            if let Some(folder) = Path::new(&self.rpg.dir).file_name() {
+            if let Some(folder) = self.attached_dir.as_deref().and_then(Path::file_name) {
                 return folder.to_string_lossy().into_owned();
             }
         }
@@ -3529,6 +3534,7 @@ impl eframe::App for CheatuApp {
             self.procs = list_processes();
             self.procs_refreshed = Some(Instant::now());
             let detections = &mut self.detections;
+            detections.retain_running(&self.procs);
             self.game_rows = start_screen::fold(&self.procs, &mut |p| detections.get(p));
             // Preselect the most likely game, unless the user picked one
             // that is still running.
@@ -3835,6 +3841,31 @@ mod tests {
         ));
         let mut clean = CheatuApp::default();
         assert!(clean.request_elevate(Some(5)));
+    }
+
+    /// M4: attaching uses what the game list detected for the row.
+    #[test]
+    fn attach_uses_the_rows_detection() {
+        let mut app = CheatuApp {
+            game_rows: vec![start_screen::GameRow {
+                pid: own_pid(),
+                name: "Game".into(),
+                rss: 1,
+                wine: false,
+                engine: Some(cheatu_inject::Engine::RpgMakerMZ),
+                dir: Some(PathBuf::from("/games/Sakura Quest")),
+                locked: false,
+                helpers: 2,
+                renderer: true,
+            }],
+            ..Default::default()
+        };
+        app.attach(own_pid());
+        assert_eq!(app.attached_rpg, Some(cheatu_inject::Engine::RpgMakerMZ));
+        assert_eq!(app.rpg.dir, "/games/Sakura Quest");
+        // M8: the title stays the detected folder while the field is edited.
+        app.rpg.dir = "/somewhere/else".into();
+        assert_eq!(app.game_title(), "Sakura Quest");
     }
 
     /// I5: a plain address means nothing in another game: never freeze into it.
