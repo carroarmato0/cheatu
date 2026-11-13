@@ -170,3 +170,24 @@ fn marker_absent_from_binary() {
     let needle = b"CHEATU-TESTBED!!";
     assert!(!bin.windows(needle.len()).any(|w| w == needle));
 }
+
+#[test]
+fn interactive_marker_is_ready_to_paste() {
+    let mut child = Command::new(EXE)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"marker\nquit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("aob(\"43 48 45 41 54 55 2d 54 45 53 54 42 45 44 21 21\")"),
+        "{text}"
+    );
+}

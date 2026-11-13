@@ -3,10 +3,13 @@
 //! - `GOLD`, `GOLD_SHOWN` (non-zero, `.data`) and `KILLS` (zero, `.bss`) are
 //!   statics, so `"cheatu-testbed"+0x…` finds them after a restart.
 //! - Everything else hangs off `WORLD`: `[WORLD] → World`, `[World+0] → Level`,
-//!   `[Level+8] → Player`, then fields. `next` and death reallocate `Level`,
-//!   `Player` and `Inventory`, so their addresses move but the chain holds.
+//!   `[Level+8] → Player`, then fields. `next` and death allocate a new
+//!   `Level`, `Player` and `Inventory`, so their addresses move but the chain
+//!   holds. Old levels are retired, never freed: their addresses are never
+//!   handed out again, and a stale address (say, a frozen cheat) keeps
+//!   pointing at live, unused memory.
 //! - `Player` starts with a 16-byte marker for `aob(…)`. It is stored XOR'd in
-//!   the binary and decoded byte by byte into the heap, and freed copies are
+//!   the binary and decoded byte by byte into the heap, and retired copies are
 //!   zeroed, so a live process holds exactly one copy.
 //!
 //! The game is single-threaded; `WORLD` is set once by [`init`].
@@ -50,10 +53,14 @@ pub const NAMES: [&str; 9] = [
 #[repr(C)]
 struct World {
     level: Box<Level>,
-    /// Allocations kept alive so a new level never reuses the old addresses.
+    /// Allocations between levels, kept alive so levels are not adjacent.
     // Separate allocations on purpose, hence the boxes.
     #[allow(clippy::vec_box)]
     padding: Vec<Box<[u8; 256]>>,
+    /// Old levels, never freed (see the module docs). Boxed so they keep
+    /// their addresses.
+    #[allow(clippy::vec_box)]
+    retired: Vec<Box<Level>>,
 }
 
 #[repr(C)]
@@ -79,22 +86,21 @@ struct Inventory {
     tail: [u8; 6],
 }
 
-impl Drop for Player {
-    fn drop(&mut self) {
-        for b in &mut self.marker {
-            // SAFETY: `b` is a valid, exclusive reference.
-            unsafe { write_volatile(b, 0) };
-        }
+/// Zero `level`'s marker and inventory signature bytes and keep it allocated.
+fn retire(w: &mut World, mut level: Box<Level>) {
+    let p = &mut *level.player;
+    let inv = &mut *p.inventory;
+    let bytes = p
+        .marker
+        .iter_mut()
+        .chain(inv.head.iter_mut())
+        .chain(inv.tail.iter_mut());
+    for b in bytes {
+        // SAFETY: `b` is a valid, exclusive reference. Volatile, so the store
+        // to memory nothing reads again is not optimised away.
+        unsafe { write_volatile(b, 0) };
     }
-}
-
-impl Drop for Inventory {
-    fn drop(&mut self) {
-        for b in self.head.iter_mut().chain(self.tail.iter_mut()) {
-            // SAFETY: `b` is a valid, exclusive reference.
-            unsafe { write_volatile(b, 0) };
-        }
-    }
+    w.retired.push(level);
 }
 
 pub enum Outcome {
@@ -129,11 +135,19 @@ pub struct Values {
 fn new_level(world_padding: &mut Vec<Box<[u8; 256]>>, number: u32, carry: &Player) -> Box<Level> {
     world_padding.push(Box::new([0; 256]));
     world_padding.push(Box::new([0; 256]));
-    let inventory = Box::new(Inventory {
-        head: INV_HEAD,
+    let mut inventory = Box::new(Inventory {
+        head: [0; 8],
         ammo: carry.inventory.ammo,
-        tail: INV_TAIL,
+        tail: [0; 6],
     });
+    // Like the marker below: written in place, so no copy of the signature
+    // bytes is left on the stack.
+    let fixed = INV_HEAD.iter().chain(&INV_TAIL);
+    let slots = inventory.head.iter_mut().chain(inventory.tail.iter_mut());
+    for (dst, &src) in slots.zip(fixed) {
+        // SAFETY: `dst` is a valid, exclusive reference.
+        unsafe { write_volatile(dst, src) };
+    }
     world_padding.push(Box::new([0; 256]));
     world_padding.push(Box::new([0; 256]));
     let mut player = Box::new(Player {
@@ -185,15 +199,21 @@ pub fn init() {
     }
     let mut padding = Vec::with_capacity(64);
     let level = new_level(&mut padding, 1, &start_player());
-    WORLD.store(Box::into_raw(Box::new(World { level, padding })), Relaxed);
+    let world = World {
+        level,
+        padding,
+        retired: Vec::new(),
+    };
+    WORLD.store(Box::into_raw(Box::new(world)), Relaxed);
 }
 
 fn reset() {
     GOLD.store(START_GOLD, Relaxed);
     KILLS.store(0, Relaxed);
     let w = world();
-    w.padding.clear();
-    w.level = new_level(&mut w.padding, 1, &start_player());
+    let level = new_level(&mut w.padding, 1, &start_player());
+    let old = std::mem::replace(&mut w.level, level);
+    retire(w, old);
 }
 
 /// Perform `a`. Refused actions change nothing. hp at or below zero resets
@@ -226,7 +246,8 @@ pub fn apply(a: Action) -> Outcome {
             let number = w.level.number + 1;
             let mut level = new_level(&mut w.padding, number, &w.level.player);
             level.player.mana += 25.0;
-            w.level = level;
+            let old = std::mem::replace(&mut w.level, level);
+            retire(w, old);
         }
     }
     if w.level.player.hp <= 0 {
@@ -325,6 +346,21 @@ mod tests {
         next_moves_heap_keeps_values();
         death_resets();
         marker_survives_next_and_death();
+        heap_addresses_never_repeat();
+    }
+
+    fn heap_addresses_never_repeat() {
+        let mut seen = std::collections::HashSet::new();
+        for step in 0..6 {
+            for name in ["hp", "ammo", "marker"] {
+                assert!(seen.insert(addr(name)), "{name} reused at step {step}");
+            }
+            if step == 3 {
+                die();
+            } else {
+                apply(Action::Next);
+            }
+        }
     }
 
     fn starting_values() {

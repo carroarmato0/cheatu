@@ -19,6 +19,12 @@ fn status_line() -> String {
     )
 }
 
+/// `"4348…"` as `"43 48 …"`, the form cheatu's byte patterns take.
+fn spaced(hex: &str) -> String {
+    let bytes: Vec<&str> = (0..hex.len()).step_by(2).map(|i| &hex[i..i + 2]).collect();
+    bytes.join(" ")
+}
+
 fn interactive() -> io::Result<()> {
     let mut out = io::stdout().lock();
     writeln!(
@@ -44,7 +50,7 @@ fn interactive() -> io::Result<()> {
             "help" => writeln!(out, "Commands: {}", script::HELP)?,
             "status" => writeln!(out, "{}", status_line())?,
             "addrs" => writeln!(out, "{}", script::addrs_line())?,
-            "marker" => writeln!(out, "{}", world::marker_hex())?,
+            "marker" => writeln!(out, "aob(\"{}\")", spaced(&world::marker_hex()))?,
             _ if cmd.starts_with("get ") || cmd == "get" => {
                 match cmd.split_whitespace().nth(1).and_then(script::get) {
                     Some(v) => writeln!(out, "{v}")?,

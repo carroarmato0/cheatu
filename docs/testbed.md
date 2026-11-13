@@ -38,7 +38,7 @@ Level 1  HP 93/100  Mana 50  XP 12.5  Gold 115  Ammo 10  Kills 1
 | `next` | next level: HP, mana, XP and ammo **move to new memory**; Mana +25 |
 | `addrs` | print where every value really is (the answers) |
 | `get <name>` | print one value |
-| `marker` | print the 16-byte marker in hex |
+| `marker` | print the 16-byte marker, as a ready-to-paste `aob("…")` |
 | `help`, `quit` | |
 
 At 0 HP you die and everything starts over, including the memory layout.
@@ -79,7 +79,8 @@ Start the testbed in one terminal and cheatu-gui next to it, and attach to
 
 Find HP (100 → `fight` → 93), add it to the cheat table and freeze it. `fight`
 as often as you like: HP stays put. Now type `next` and `fight` again: the
-frozen row no longer helps, because HP moved to new memory. Exercise 4 fixes
+frozen row no longer helps, because HP moved to new memory (the old address
+stays allocated but unused, so the freeze is harmless). Exercise 4 fixes
 that.
 
 ### 3. Survive a restart with a table
@@ -109,7 +110,9 @@ the new process.
 
 From the Ammo row's menu choose **Make AoB signature**. cheatu finds a unique byte
 pattern around it and stores `aob("…")`; it survives restarts and `next`.
-For the marker, search the bytes from `marker` as an array of bytes.
+For the marker, type `marker` in the testbed: it prints a ready-made
+`aob("43 48 …")` address. Add it to the table as an address, or search the
+bytes between the quotes as an Array of Bytes.
 
 ### 6. The wizard
 
