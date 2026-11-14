@@ -1352,6 +1352,8 @@ struct CheatuApp {
     table_process: Option<String>,
     /// Folder the file dialog starts in next time.
     last_table_dir: Option<PathBuf>,
+    /// A native panel's answer (macOS), handled with the in-app dialog's.
+    native_done: Option<(DialogPurpose, file_dialog::Outcome, PathBuf)>,
     file_dialog: Option<(DialogPurpose, FileDialog)>,
     /// After opening a table: offer to attach to this (pid, name).
     attach_offer: Option<(i32, String)>,
@@ -2136,6 +2138,20 @@ impl CheatuApp {
     }
 
     /// Apply a finished "Make AoB signature".
+    /// The file name a save of My cheats suggests.
+    fn table_file_name(&self) -> String {
+        self.table_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .or_else(|| {
+                self.attached
+                    .as_ref()
+                    .map(|(_, n)| format!("{n}.{TABLE_EXT}"))
+            })
+            .unwrap_or_else(|| format!("cheats.{TABLE_EXT}"))
+    }
+
     /// A signature run ended: forget its state; returns where to report.
     fn finish_signature(&mut self) -> Option<eframe::egui::Rect> {
         self.sig_pending = None;
@@ -2253,6 +2269,40 @@ impl CheatuApp {
     fn open_file_dialog(&mut self, purpose: DialogPurpose) {
         let home = home_dir();
         let start = file_dialog::start_dir(self.last_table_dir.as_deref(), &home);
+        if file_dialog::uses_native() {
+            let outcome = match purpose {
+                DialogPurpose::OpenTable => file_dialog::native(
+                    file_dialog::Mode::Open,
+                    "Open cheat table",
+                    TABLE_EXT,
+                    &start,
+                    "",
+                ),
+                DialogPurpose::SaveTable => {
+                    if let Some(why) = self.save_blocker() {
+                        self.status = format!("Not saved: {why}");
+                        self.after_save = None;
+                        return;
+                    }
+                    file_dialog::native(
+                        file_dialog::Mode::Save,
+                        "Save cheat table",
+                        TABLE_EXT,
+                        &start,
+                        &self.table_file_name(),
+                    )
+                }
+            };
+            let dir = match &outcome {
+                file_dialog::Outcome::Picked(p) => {
+                    p.parent().map_or(start.clone(), Path::to_path_buf)
+                }
+                file_dialog::Outcome::Cancelled => start,
+            };
+            // Handled where the in-app dialog's answer is.
+            self.native_done = Some((purpose, outcome, dir));
+            return;
+        }
         let dialog = match purpose {
             DialogPurpose::OpenTable => FileDialog::new(
                 file_dialog::Mode::Open,
@@ -2269,17 +2319,7 @@ impl CheatuApp {
                     self.after_save = None;
                     return;
                 }
-                let name = self
-                    .table_path
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .or_else(|| {
-                        self.attached
-                            .as_ref()
-                            .map(|(_, n)| format!("{n}.{TABLE_EXT}"))
-                    })
-                    .unwrap_or_else(|| format!("cheats.{TABLE_EXT}"));
+                let name = self.table_file_name();
                 FileDialog::new(
                     file_dialog::Mode::Save,
                     "Save cheat table",
@@ -3504,30 +3544,40 @@ impl eframe::App for CheatuApp {
         if let Some(purpose) = open_dialog {
             self.open_file_dialog(purpose);
         }
+        // The in-app dialog's answer, or the native panel's (macOS).
+        let mut done = None;
         if let Some((purpose, dialog)) = &mut self.file_dialog {
-            let purpose = *purpose;
             if let Some(outcome) = dialog.show(ctx) {
-                self.last_table_dir = Some(dialog.dir().to_path_buf());
-                self.file_dialog = None;
-                if let file_dialog::Outcome::Picked(path) = outcome {
-                    match purpose {
-                        DialogPurpose::OpenTable => self.open_table_file(path),
-                        DialogPurpose::SaveTable => {
-                            self.save_table(path);
-                            // Saved on the way to quitting or opening.
-                            if let Some(p) = self.after_save.take() {
-                                if !self.saved_mark.is_dirty(&self.saved) {
-                                    if let Some(next) = self.go_ahead(ctx, p) {
-                                        self.open_file_dialog(next);
-                                    }
+                done = Some((*purpose, outcome, dialog.dir().to_path_buf()));
+            }
+        }
+        if done.is_some() {
+            self.file_dialog = None;
+        }
+        if let Some((purpose, outcome, dir)) = done.or_else(|| self.native_done.take()) {
+            self.last_table_dir = Some(dir);
+            if let file_dialog::Outcome::Picked(path) = outcome {
+                match purpose {
+                    DialogPurpose::OpenTable => self.open_table_file(path),
+                    DialogPurpose::SaveTable => {
+                        self.save_table(path);
+                        // Saved on the way to quitting or opening.
+                        if let Some(p) = self.after_save.take() {
+                            if !self.saved_mark.is_dirty(&self.saved) {
+                                if let Some(next) = self.go_ahead(ctx, p) {
+                                    self.open_file_dialog(next);
                                 }
                             }
                         }
                     }
-                } else {
-                    self.after_save = None;
                 }
+            } else {
+                self.after_save = None;
             }
+        }
+        // A native panel opened just now answers on the next frame.
+        if self.native_done.is_some() {
+            ctx.request_repaint();
         }
         // ---- Pointer scan window -----------------------------------------
         if let Some(i) = do_ptr_scan {

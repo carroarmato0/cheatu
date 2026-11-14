@@ -203,7 +203,8 @@ My cheats (the cheat table) can be saved to a file and opened again later, or sh
 someone else.
 
 - **💾 Save**, **Save as…** (in the **⋯** menu, and beside Save in Advanced)
-  and **📂 Open…** sit above the table. The file is
+  and **📂 Open…** sit above the table (on macOS they open the native
+  panels, see the [macOS guide](macos.md)). The file is
   plain TOML (`.toml`), readable and editable by hand:
 
   ```toml

@@ -1,7 +1,7 @@
 //! The pointer scan window: settings, a background map build and chain
 //! search, and the results with their filters, save/open and "Add to table".
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -490,6 +490,19 @@ impl PointerWindow {
     fn open_dialog(&mut self, kind: DialogKind) {
         let home = crate::home_dir();
         let start = crate::file_dialog::start_dir(self.last_dir.as_deref(), &home);
+        if crate::file_dialog::uses_native() {
+            let name = format!("{}.{PTR_EXT}", self.process);
+            let (mode, title) = match kind {
+                DialogKind::Open => (Mode::Open, "Open pointer scan results"),
+                DialogKind::Save => (Mode::Save, "Save pointer scan results"),
+            };
+            let outcome = crate::file_dialog::native(mode, title, PTR_EXT, &start, &name);
+            if let crate::file_dialog::Outcome::Picked(path) = outcome {
+                self.last_dir = path.parent().map(Path::to_path_buf);
+                self.file_picked(kind, path);
+            }
+            return;
+        }
         let dialog = match kind {
             DialogKind::Open => FileDialog::new(
                 Mode::Open,

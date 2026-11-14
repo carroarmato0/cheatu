@@ -40,6 +40,12 @@ macOS only hands out another process's memory (its Mach *task port*) to
 
 The GUI keeps its settings in `~/Library/Application Support/cheatu/`.
 
+Opening and saving cheat tables (and pointer-scan results) uses the native
+macOS open and save panels. macOS privacy protection keeps an elevated
+cheatu out of Downloads, Documents and Desktop ("Operation not permitted"),
+but a file you pick in the native panel is allowed, so you can save and open
+anywhere in your home folder, with or without admin rights.
+
 ## Hardened runtime and SIP
 
 Even root is refused for processes protected by the **hardened runtime** or
@@ -66,3 +72,4 @@ the process list, just like Proton games on Linux.
 | Elevation | `pkexec` (polkit) | administrator prompt (GUI) / `sudo` (CLI) |
 | `[heap]` / `[stack]` labels | from `/proc/<pid>/maps` | derived from malloc / stack VM tags |
 | Settings | `~/.config/cheatu/` | `~/Library/Application Support/cheatu/` |
+| Open / save tables | cheatu's own file dialog | the native macOS panels |

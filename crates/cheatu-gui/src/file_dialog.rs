@@ -97,6 +97,49 @@ pub enum Outcome {
     Cancelled,
 }
 
+/// The platform's own open/save panel is used instead of [`FileDialog`]: on
+/// macOS a file picked there is reachable even when privacy protection
+/// (TCC) keeps an elevated cheatu out of its folder (Downloads, Documents…).
+pub fn uses_native() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// What a native panel returned, as an [`Outcome`]: a saved file gets the
+/// extension when it was typed without it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn native_outcome(mode: Mode, picked: Option<PathBuf>, ext: &str) -> Outcome {
+    match picked {
+        None => Outcome::Cancelled,
+        Some(p) if mode == Mode::Save && !has_ext(&p, ext) => {
+            let mut name = p.into_os_string();
+            name.push(format!(".{ext}"));
+            Outcome::Picked(PathBuf::from(name))
+        }
+        Some(p) => Outcome::Picked(p),
+    }
+}
+
+/// Show the platform's own panel and wait for it (it is modal). The panel
+/// asks before replacing an existing file.
+#[cfg(target_os = "macos")]
+pub fn native(mode: Mode, title: &str, ext: &str, start: &Path, name: &str) -> Outcome {
+    let dialog = rfd::FileDialog::new()
+        .set_title(title)
+        .set_directory(start)
+        .add_filter(format!(".{ext}"), &[ext]);
+    let picked = match mode {
+        Mode::Open => dialog.pick_file(),
+        Mode::Save => dialog.set_file_name(name).save_file(),
+    };
+    native_outcome(mode, picked, ext)
+}
+
+/// No native panel here (see [`uses_native`]).
+#[cfg(not(target_os = "macos"))]
+pub fn native(_mode: Mode, _title: &str, _ext: &str, _start: &Path, _name: &str) -> Outcome {
+    Outcome::Cancelled
+}
+
 /// An open dialog window. Keep it in the app state and call
 /// [`FileDialog::show`] every frame until it returns an [`Outcome`].
 pub struct FileDialog {
@@ -338,6 +381,26 @@ impl FileDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_panels_on_macos_only() {
+        assert_eq!(uses_native(), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn native_save_gets_the_extension() {
+        let o = native_outcome(Mode::Save, Some(PathBuf::from("/d/zelda")), "toml");
+        assert_eq!(o, Outcome::Picked(PathBuf::from("/d/zelda.toml")));
+        let o = native_outcome(Mode::Save, Some(PathBuf::from("/d/zelda.TOML")), "toml");
+        assert_eq!(o, Outcome::Picked(PathBuf::from("/d/zelda.TOML")));
+        let o = native_outcome(Mode::Open, Some(PathBuf::from("/d/zelda")), "toml");
+        assert_eq!(
+            o,
+            Outcome::Picked(PathBuf::from("/d/zelda")),
+            "open takes the file as is"
+        );
+        assert_eq!(native_outcome(Mode::Save, None, "toml"), Outcome::Cancelled);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("cheatu-fd-{}-{name}", std::process::id()));
