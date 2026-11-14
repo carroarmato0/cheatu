@@ -67,6 +67,11 @@ fn process_exists(pid: i32) -> bool {
     rc == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
+/// Whether `pid` still runs.
+pub(crate) fn process_alive(pid: i32) -> bool {
+    pid > 0 && process_exists(pid)
+}
+
 fn is_root() -> bool {
     // SAFETY: geteuid is always safe to call.
     unsafe { libc::geteuid() == 0 }

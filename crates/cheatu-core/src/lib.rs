@@ -34,7 +34,7 @@ pub use maps::{
     ModuleError, RegionKind,
 };
 pub use mem::{probe_address, Mem, ProbeOutcome};
-pub use process::{human_bytes, list_processes, resume, suspend, ProcInfo};
+pub use process::{human_bytes, list_processes, process_alive, resume, suspend, ProcInfo};
 pub use scan::{
     address_hint, parse_aob, parse_range, AddrHint, Confidence, FirstScan, NextScan, ScanProgress,
     Scanner, ANY_TYPES,

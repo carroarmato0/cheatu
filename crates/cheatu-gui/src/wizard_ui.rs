@@ -543,6 +543,11 @@ impl WizardWindow {
         self.job.is_some() || matches!(self.view.step, Step::WaitRestart { .. })
     }
 
+    /// Waiting for the user to restart the game: its exit is expected.
+    pub fn waiting_for_restart(&self) -> bool {
+        matches!(self.view.step, Step::WaitRestart { .. })
+    }
+
     /// The pid the wizard works on (it follows a restarted game).
     pub fn pid(&self) -> i32 {
         self.view.pid

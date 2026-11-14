@@ -2,7 +2,7 @@
 //! public modules (`mem`, `maps`, `process`, `privilege`, `scan`) build on:
 //!
 //! * `MemHandle` — open / `read_at` / `write_at` on a target's address space
-//! * `accessible`, `read_maps`, `raw_processes`, `environ`, `available_memory`
+//! * `accessible`, `process_alive`, `read_maps`, `raw_processes`, `environ`, `available_memory`
 //! * `ELEVATION_TOOL`, `elevation_available`, `relaunch_elevated`
 
 #[cfg(target_os = "linux")]

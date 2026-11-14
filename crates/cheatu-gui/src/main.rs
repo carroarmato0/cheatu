@@ -82,6 +82,9 @@ struct FreezeShared {
 /// address expressions.
 const REGIONS_REFRESH: Duration = Duration::from_secs(1);
 
+/// How often the attached game is checked for having exited.
+const ALIVE_CHECK: Duration = Duration::from_secs(1);
+
 /// File extension of cheat tables.
 const TABLE_EXT: &str = "toml";
 
@@ -1339,6 +1342,8 @@ struct CheatuApp {
     live: Option<LiveSource>,
     /// When `live`'s memory map was last re-read.
     live_refreshed: Option<Instant>,
+    /// When the attached game was last checked for having exited.
+    alive_checked: Option<Instant>,
     /// The one `aob(...)` resolve running in the background.
     aob_pending: Option<Receiver<cheat_table::BgResolve>>,
     /// Bumped on attach and on every expression edit; a background resolve
@@ -1967,6 +1972,34 @@ impl CheatuApp {
         });
     }
 
+    /// Let go of the game once it has exited, so frozen cheats stop failing
+    /// against a process that is gone. While the guided steps wait for the
+    /// game to restart they follow it themselves.
+    fn check_game_alive(&mut self, alive: impl Fn(i32) -> bool) {
+        let Some(pid) = self.attached.as_ref().map(|(p, _)| *p) else {
+            return;
+        };
+        if self
+            .alive_checked
+            .is_some_and(|t| t.elapsed() < ALIVE_CHECK)
+        {
+            return;
+        }
+        self.alive_checked = Some(Instant::now());
+        if alive(pid)
+            || self
+                .wizard
+                .as_ref()
+                .is_some_and(|w| w.waiting_for_restart())
+        {
+            return;
+        }
+        let title = self.game_title();
+        self.detach();
+        self.status =
+            format!("{title} has exited. Your cheats are kept; attach to it again to use them.");
+    }
+
     /// Publish the current set of frozen values to the background thread.
     /// Entries that do not resolve are left out: never written.
     fn sync_freezes(&mut self) {
@@ -2494,6 +2527,7 @@ impl eframe::App for CheatuApp {
             self.feedback.scrolled();
         }
         self.poll_probe();
+        self.check_game_alive(cheatu_core::process_alive);
         self.resolve_entries();
         self.poll_signature();
         self.sync_freezes();
@@ -3911,6 +3945,41 @@ mod tests {
         };
         app.detach();
         assert!(app.probe_cancel.load(Ordering::Relaxed));
+    }
+
+    /// The game exited: let go of it, keep the cheats and stop writing.
+    #[test]
+    fn exited_game_is_detached_and_cheats_kept() {
+        let mut app = CheatuApp {
+            attached: Some((own_pid(), "zelda".into())),
+            saved: vec![cheat("\"game\"+0x10", "99", true)],
+            ..Default::default()
+        };
+        app.check_game_alive(|_| false);
+        assert!(app.attached.is_none());
+        assert!(app.status.contains("zelda has exited"), "{}", app.status);
+        assert_eq!(app.saved.len(), 1);
+        assert!(
+            app.saved[0].entry.frozen,
+            "the freeze resumes on the next attach"
+        );
+        app.sync_freezes();
+        assert_eq!(
+            app.freeze_state.lock().unwrap().pid,
+            0,
+            "nothing is written"
+        );
+    }
+
+    /// A running game stays attached.
+    #[test]
+    fn running_game_stays_attached() {
+        let mut app = CheatuApp {
+            attached: Some((own_pid(), "zelda".into())),
+            ..Default::default()
+        };
+        app.check_game_alive(|_| true);
+        assert!(app.attached.is_some());
     }
 
     /// I3: a save that cannot start must not leave Quit armed for later.

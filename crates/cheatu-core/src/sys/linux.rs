@@ -51,6 +51,18 @@ pub(crate) fn accessible(pid: i32) -> bool {
         .is_ok()
 }
 
+/// Whether `pid` still runs: it is in `/proc` and not a zombie (exited, not
+/// yet reaped by its parent).
+pub(crate) fn process_alive(pid: i32) -> bool {
+    pid > 0
+        && fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+            let state = s
+                .rfind(')')
+                .and_then(|i| s[i + 1..].split_whitespace().next());
+            state.is_some_and(|st| st != "Z")
+        })
+}
+
 /// Read and parse the memory map of `pid`.
 ///
 /// Each line looks like:

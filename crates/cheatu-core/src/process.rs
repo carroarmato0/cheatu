@@ -144,6 +144,11 @@ fn detect_role(cmdline: &str) -> Option<String> {
     is_chromium_runtime.then(|| "main".to_string())
 }
 
+/// Whether `pid` still runs, e.g. whether the attached game has exited.
+pub fn process_alive(pid: i32) -> bool {
+    crate::sys::process_alive(pid)
+}
+
 /// Suspend a process (SIGSTOP) so its memory holds still during a scan.
 pub fn suspend(pid: i32) -> std::io::Result<()> {
     send_signal(pid, libc::SIGSTOP)
@@ -176,5 +181,15 @@ mod tests {
         let parent = unsafe { libc::getppid() };
         let p = list_processes().into_iter().find(|p| p.pid == me).unwrap();
         assert_eq!(p.ppid, parent);
+    }
+
+    /// A game that exited is told apart from one that runs.
+    #[test]
+    fn exited_process_is_not_alive() {
+        assert!(process_alive(std::process::id() as i32));
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        child.wait().unwrap();
+        assert!(!process_alive(pid));
     }
 }
