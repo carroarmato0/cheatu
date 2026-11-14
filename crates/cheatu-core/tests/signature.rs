@@ -100,7 +100,7 @@ fn unique_window_found() {
         None,
     );
     let addr = base + 2000;
-    let sig = make_signature(&src, addr, 64).unwrap();
+    let sig = make_signature(&src, addr, 4, 64).unwrap();
     assert_eq!(sig.resolve(&src).unwrap(), addr);
     assert!(src.reads.load(Ordering::SeqCst) >= 2);
     // Text form is parseable and uses uppercase hex.
@@ -120,7 +120,7 @@ fn offset_zero_is_bare_aob() {
         vec![(base, random_bytes(4096))],
         None,
     );
-    let sig = make_signature(&src, base, 64).unwrap();
+    let sig = make_signature(&src, base, 4, 64).unwrap();
     assert!(matches!(sig.0, Expr::Aob { .. }), "{sig}");
     assert_eq!(sig.resolve(&src).unwrap(), base);
 }
@@ -132,16 +132,17 @@ fn changing_bytes_become_wildcards() {
     let src = fake(
         vec![region(base, 4096, "[heap]")],
         vec![(base, random_bytes(4096))],
-        Some(addr + 2),
+        Some(addr - 2),
     );
-    let sig = make_signature(&src, addr, 64).unwrap();
+    let sig = make_signature(&src, addr, 4, 64).unwrap();
     let (pattern, module, offset) = parts(&sig);
     assert_eq!(module, None);
     assert_eq!(offset, 4);
     let toks: Vec<&str> = pattern.split(' ').collect();
     assert_eq!(toks.len(), 8);
-    assert_eq!(toks[6], "??");
-    assert_eq!(toks.iter().filter(|t| **t == "??").count(), 1);
+    assert_eq!(toks[2], "??");
+    // The changing byte and the value's own 4 bytes.
+    assert_eq!(toks.iter().filter(|t| **t == "??").count(), 5);
     assert!(src.reads.load(Ordering::SeqCst) >= 2);
 }
 
@@ -154,7 +155,7 @@ fn repetitive_memory_not_unique() {
         vec![(a, vec![0; 4096]), (b, vec![0; 4096])],
         None,
     );
-    let err = make_signature(&src, a + 2000, 64).unwrap_err();
+    let err = make_signature(&src, a + 2000, 4, 64).unwrap_err();
     assert_eq!(err, SignatureError::NotUnique);
     assert_eq!(err.to_string(), "no unique pattern within 64 bytes");
 }
@@ -167,7 +168,7 @@ fn unreadable_address() {
         vec![(base, random_bytes(4096))],
         None,
     );
-    let err = make_signature(&src, 0x900000, 64).unwrap_err();
+    let err = make_signature(&src, 0x900000, 4, 64).unwrap_err();
     assert_eq!(err, SignatureError::Unreadable(0x900000));
     assert_eq!(err.to_string(), "address 0x900000 unreadable");
 }
@@ -181,7 +182,7 @@ fn module_scope_is_used() {
         None,
     );
     let addr = base + 1000;
-    let sig = make_signature(&src, addr, 64).unwrap();
+    let sig = make_signature(&src, addr, 4, 64).unwrap();
     let (_, module, _) = parts(&sig);
     assert_eq!(module.as_deref(), Some("libgame.so"));
     assert_eq!(sig.resolve(&src).unwrap(), addr);
@@ -209,7 +210,7 @@ fn bss_tail_is_searched_with_its_module() {
         None,
     );
     let addr = tail + 1000;
-    let sig = make_signature(&src, addr, 64).expect("unique within the module");
+    let sig = make_signature(&src, addr, 4, 64).expect("unique within the module");
     let (_, module, _) = parts(&sig);
     assert_eq!(module.as_deref(), Some("libgame.so"));
     assert_eq!(sig.resolve(&src).unwrap(), addr);
@@ -224,7 +225,7 @@ fn unnameable_module_is_left_out_of_the_pattern() {
         None,
     );
     let addr = base + 1000;
-    let sig = make_signature(&src, addr, 64).unwrap();
+    let sig = make_signature(&src, addr, 4, 64).unwrap();
     assert_eq!(parts(&sig).1, None);
     assert!(sig.validate().is_ok());
     assert_eq!(sig.resolve(&src).unwrap(), addr);
@@ -250,7 +251,7 @@ fn longer_windows_are_checked_without_new_passes() {
         None,
     );
     let addr = base + addr_off as u64;
-    let sig = make_signature(&src, addr, 64).unwrap();
+    let sig = make_signature(&src, addr, 4, 64).unwrap();
     assert_eq!(sig.resolve(&src).unwrap(), addr);
     let (pattern, _, _) = parts(&sig);
     assert_eq!(
@@ -275,7 +276,7 @@ fn signature_reports_progress() {
         None,
     );
     let progress = ScanProgress::default();
-    make_signature_with(&src, base + 2000, 64, &progress).unwrap();
+    make_signature_with(&src, base + 2000, 4, 64, &progress).unwrap();
     assert_eq!(progress.fraction(), Some(1.0));
 }
 
@@ -290,7 +291,66 @@ fn cancelled_signature_stops() {
     let progress = ScanProgress::default();
     progress.cancel();
     assert_eq!(
-        make_signature_with(&src, base + 2000, 64, &progress),
+        make_signature_with(&src, base + 2000, 4, 64, &progress),
         Err(SignatureError::Cancelled)
     );
+}
+
+/// The value's own bytes change with play (a rupee count): never part of
+/// the pattern, so the address is found again whatever the value is.
+#[test]
+fn value_bytes_are_wildcards() {
+    let base = 0x10000;
+    let addr = base + 2000;
+    let mut data = random_bytes(4096);
+    let src = fake(
+        vec![region(base, 4096, "[heap]")],
+        vec![(base, data.clone())],
+        None,
+    );
+    let sig = make_signature(&src, addr, 4, 64).unwrap();
+    let (pattern, _, offset) = parts(&sig);
+    let toks: Vec<&str> = pattern.split(' ').collect();
+    let at = offset as usize;
+    assert_eq!(&toks[at..at + 4], ["??"; 4], "{sig}");
+
+    // The value changed: still found.
+    data[2000..2004].copy_from_slice(&123i32.to_le_bytes());
+    let changed = fake(vec![region(base, 4096, "[heap]")], vec![(base, data)], None);
+    assert_eq!(sig.resolve(&changed).unwrap(), addr);
+}
+
+/// An address stored next to the value differs on every run: never part of
+/// the pattern.
+#[test]
+fn pointers_are_wildcards() {
+    let base = 0x10000;
+    let addr = base + 2000;
+    let mut data = random_bytes(4096);
+    // An aligned 8-byte word just before the value pointing into the region.
+    let ptr_at = 1992;
+    data[ptr_at..ptr_at + 8].copy_from_slice(&(base + 0x123u64).to_le_bytes());
+    let src = fake(vec![region(base, 4096, "[heap]")], vec![(base, data)], None);
+    let sig = make_signature(&src, addr, 4, 64).unwrap();
+    let (pattern, _, offset) = parts(&sig);
+    let toks: Vec<&str> = pattern.split(' ').collect();
+    let ptr = (offset as usize)
+        .checked_sub(8)
+        .expect("the pointer is in the window");
+    assert_eq!(&toks[ptr..ptr + 8], ["??"; 8], "{sig}");
+}
+
+/// A value 8 bytes wide fills the smallest window: it is skipped, not
+/// searched as all wildcards.
+#[test]
+fn wide_value_still_gets_a_signature() {
+    let base = 0x10000;
+    let src = fake(
+        vec![region(base, 4096, "[heap]")],
+        vec![(base, random_bytes(4096))],
+        None,
+    );
+    let sig = make_signature(&src, base + 2000, 8, 64).unwrap();
+    assert_eq!(sig.resolve(&src).unwrap(), base + 2000);
+    assert!(parts(&sig).0.split(' ').any(|t| t != "??"));
 }

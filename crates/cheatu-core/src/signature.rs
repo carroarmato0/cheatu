@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::addr_expr::{find_matches_with, valid_module_name, AddrExpr, Expr};
-use crate::maps::{module_containing, region_for};
+use crate::maps::{module_containing, region_for, MemoryRegion};
 use crate::scan::ScanProgress;
 use crate::source::MemSource;
 
@@ -41,15 +41,18 @@ impl std::error::Error for SignatureError {}
 
 /// Make an expression resolving to `addr`: `aob("<pattern>"[, "<module>"])`
 /// plus `+0x<offset>` when `addr` is not the start of the pattern. The memory
-/// around `addr` is read twice, 50 ms apart; bytes that differ become `??`.
-/// The window grows from 8 bytes in steps of 8, up to `max_len`, until it
-/// matches exactly once.
+/// around `addr` is read twice, 50 ms apart; bytes that differ become `??`,
+/// and so do bytes that differ on the next run or later in play: the value
+/// itself (`size` bytes at `addr`) and every aligned 8-byte word that reads
+/// as an address in the target. The window grows from 8 bytes in steps of
+/// 8, up to `max_len`, until it matches exactly once.
 pub fn make_signature(
     src: &dyn MemSource,
     addr: u64,
+    size: usize,
     max_len: usize,
 ) -> Result<AddrExpr, SignatureError> {
-    make_signature_with(src, addr, max_len, &ScanProgress::default())
+    make_signature_with(src, addr, size, max_len, &ScanProgress::default())
 }
 
 /// [`make_signature`], reporting progress in chunks of memory searched and
@@ -62,6 +65,7 @@ pub fn make_signature(
 pub fn make_signature_with(
     src: &dyn MemSource,
     addr: u64,
+    size: usize,
     max_len: usize,
     progress: &ScanProgress,
 ) -> Result<AddrExpr, SignatureError> {
@@ -88,9 +92,11 @@ pub fn make_signature_with(
     if addr_idx >= n {
         return Err(unreadable);
     }
-    let bytes: Vec<Option<u8>> = (0..n)
+    let mut bytes: Vec<Option<u8>> = (0..n)
         .map(|i| (first[i] == second[i]).then_some(first[i]))
         .collect();
+    bytes[addr_idx..(addr_idx + size.max(1)).min(n)].fill(None);
+    mask_pointers(&mut bytes, ctx_start, src.regions());
 
     // A module whose file name cannot be written in an expression is left
     // out: the pattern then has to be unique in all of memory.
@@ -102,7 +108,9 @@ pub fn make_signature_with(
     for size in (8..=max_len).step_by(8) {
         let lo = addr_idx.saturating_sub(size / 2);
         let hi = (lo + size).min(n);
-        if windows.last() != Some(&(lo, hi)) {
+        // A window of wildcards only matches everywhere.
+        let fixed = bytes[lo..hi].iter().any(Option::is_some);
+        if fixed && windows.last() != Some(&(lo, hi)) {
             windows.push((lo, hi));
         }
     }
@@ -171,4 +179,19 @@ pub fn make_signature_with(
         }
     }
     Err(SignatureError::NotUnique)
+}
+
+/// Turn every 8-byte word aligned in the target that reads as an address in
+/// one of `regions` into wildcards: where things are allocated changes on
+/// every run. `bytes` starts at `start`.
+fn mask_pointers(bytes: &mut [Option<u8>], start: u64, regions: &[MemoryRegion]) {
+    let first = (start.next_multiple_of(8) - start) as usize;
+    for i in (first..bytes.len().saturating_sub(7)).step_by(8) {
+        let word: Option<Vec<u8>> = bytes[i..i + 8].iter().copied().collect();
+        let Some(word) = word else { continue };
+        let value = u64::from_le_bytes(word.try_into().expect("8 bytes"));
+        if region_for(regions, value).is_some() {
+            bytes[i..i + 8].fill(None);
+        }
+    }
 }

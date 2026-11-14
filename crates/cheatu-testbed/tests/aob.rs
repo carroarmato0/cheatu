@@ -43,7 +43,7 @@ fn aob_marker_survives_restart_and_next() {
 fn signature_for_ammo_survives_restart() {
     let mut tb = Testbed::spawn();
     let Some(src) = attach(&tb) else { return };
-    let expr = make_signature(&src, tb.addr("ammo"), 64).unwrap();
+    let expr = make_signature(&src, tb.addr("ammo"), 2, 64).unwrap();
 
     let Some((mut tb, mut src)) = restart(tb, src) else {
         return;
@@ -60,5 +60,20 @@ fn signature_for_ammo_survives_restart() {
         expr.resolve(&src),
         Ok(tb.addr("ammo")),
         "after next: {expr}"
+    );
+}
+
+/// The signature does not hold the value itself: after a shot changed the
+/// ammo it still finds it.
+#[test]
+fn signature_for_ammo_survives_a_value_change() {
+    let mut tb = Testbed::spawn();
+    let Some(src) = attach(&tb) else { return };
+    let expr = make_signature(&src, tb.addr("ammo"), 2, 64).unwrap();
+    tb.cmd("shoot");
+    assert_eq!(
+        expr.resolve(&src),
+        Ok(tb.addr("ammo")),
+        "after a shot: {expr}"
     );
 }

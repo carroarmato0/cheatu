@@ -41,7 +41,7 @@ fn table_round_trip_writes_through_each_entry() {
         .to_expr();
     drop(map);
 
-    let ammo = make_signature(&src, tb.addr("ammo"), 64).unwrap();
+    let ammo = make_signature(&src, tb.addr("ammo"), 2, 64).unwrap();
 
     let t = CheatTable {
         process: Some(MODULE.into()),

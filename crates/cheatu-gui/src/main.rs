@@ -2148,6 +2148,7 @@ impl CheatuApp {
             return;
         }
         let (id, expr, generation) = (e.id, e.entry.address.clone(), self.resolve_generation);
+        let size = e.entry.ty.size();
         let (tx, rx) = mpsc::channel();
         let progress = Arc::new(ScanProgress::default());
         self.sig_pending = Some(rx);
@@ -2157,7 +2158,7 @@ impl CheatuApp {
         self.status = "Making a signature…".into();
         std::thread::spawn(move || {
             let result = match LiveSource::open(pid) {
-                Ok(src) => cheatu_core::make_signature_with(&src, addr, 64, &progress),
+                Ok(src) => cheatu_core::make_signature_with(&src, addr, size, 64, &progress),
                 Err(_) => Err(cheatu_core::SignatureError::Unreadable(addr)),
             };
             let _ = tx.send(cheat_table::BgSignature {
