@@ -15,7 +15,7 @@ depends=('gcc-libs' 'glibc'
 optdepends=('noto-fonts-cjk: CJK text rendering in the GUI')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('71da4074587595eda4a5b9db3f3a7e541bc90ebc2e59cf380a0ed8edeca7e610')
+sha256sums=('9fc9f61634e350b7e3325a120ba9b3d8416449821aa2491f593dacb5d32372b9')
 
 prepare() {
     cd "$pkgname-$pkgver"
