@@ -48,6 +48,20 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.2.0" date="2026-11-17">
+      <description>
+        <p>macOS: cheatu now runs on macOS, with a native admin prompt for
+           attaching, native open/save panels and an app bundle.</p>
+        <p>Cheat tables: save and open tables, and point entries at address
+           expressions such as module+offset and pointer chains, so cheats
+           keep working after a game restarts.</p>
+        <p>Pointer scan and AoB signatures: find a pointer chain to a value,
+           and make a byte signature that survives game updates.</p>
+        <p>Guided mode: a start screen listing running games, guided steps,
+           a cheat wizard and RPG Maker detection. The theme follows the
+           system's light or dark setting.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-09-04">
       <description>
         <p>Scanning: search a range of values when you can only bracket a
